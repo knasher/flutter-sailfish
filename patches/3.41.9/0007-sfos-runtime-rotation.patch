@@ -11,7 +11,8 @@ gets appOrientationChanged, and its input-method area (native coordinates) is
 mapped into the rotated view for the keyboard inset. The native surface is
 resized with un-rotated dimensions.
 
-FLUTTER_SFOS_ROTATION=0 disables rotation; FLUTTER_SFOS_SHELL=xdg keeps xdg_shell.
+FLUTTER_SFOS_ROTATION=0 disables rotation. FLUTTER_SFOS_SHELL=xdg keeps
+xdg_shell and the upstream behaviour (no runtime rotation).
 Vendors surface-extension.xml (BSD, The Qt Company) from sailfishos/qtwayland.
 
 diff --git a/cmake/build.cmake b/cmake/build.cmake
@@ -152,7 +153,7 @@ index 6613090..32a4993 100644
    static gboolean MaliitHandleIMInitiatedHide(MaliitContext* obj,
                                                GDBusMethodInvocation* invocation,
 diff --git a/src/flutter/shell/platform/linux_embedded/window/elinux_window_wayland.cc b/src/flutter/shell/platform/linux_embedded/window/elinux_window_wayland.cc
-index a124841..48908ea 100644
+index a124841..062477f 100644
 --- a/src/flutter/shell/platform/linux_embedded/window/elinux_window_wayland.cc
 +++ b/src/flutter/shell/platform/linux_embedded/window/elinux_window_wayland.cc
 @@ -16,6 +16,7 @@
@@ -163,7 +164,7 @@ index a124841..48908ea 100644
  #include <locale>
  #include <unordered_map>
  
-@@ -207,6 +208,78 @@ const xdg_toplevel_listener ELinuxWindowWayland::kXdgToplevelListener = {
+@@ -207,6 +208,77 @@ const xdg_toplevel_listener ELinuxWindowWayland::kXdgToplevelListener = {
            self->running_ = false;
          }};
  
@@ -213,7 +214,6 @@ index a124841..48908ea 100644
 +              ELINUX_LOG(INFO)
 +                  << "qt_extended_surface.onscreen_visibility: " << visible;
 +              auto self = reinterpret_cast<ELinuxWindowWayland*>(data);
-+              self->onscreen_visibility_ = visible;
 +              // Undocumented; observed on SFOS 5.2: 5 in the foreground, 3
 +              // while shown as an app cover, 0 when hidden. Bit 2 is taken
 +              // to mean "cover".
@@ -242,14 +242,14 @@ index a124841..48908ea 100644
  const wl_surface_listener ELinuxWindowWayland::kWlSurfaceListener = {
      .enter =
          [](void* data, wl_surface* wl_surface, wl_output* output) {
-@@ -725,11 +798,16 @@ const wl_output_listener ELinuxWindowWayland::kWlOutputListener = {
+@@ -725,11 +797,16 @@ const wl_output_listener ELinuxWindowWayland::kWlOutputListener = {
        auto self = reinterpret_cast<ELinuxWindowWayland*>(data);
        if (flags & WL_OUTPUT_MODE_CURRENT) {
          self->output_mode_width_ = width;
 +        // While following the output transform, the rotation is applied on
 +        // wl_output.done, so only the current rotation counts here.
 +        const bool transform_rotated =
-+            !self->follow_output_transform_ &&
++            !self->FollowsOutputTransform() &&
 +            (self->transform_ == WL_OUTPUT_TRANSFORM_90 ||
 +             self->transform_ == WL_OUTPUT_TRANSFORM_270 ||
 +             self->transform_ == WL_OUTPUT_TRANSFORM_FLIPPED_90 ||
@@ -263,7 +263,7 @@ index a124841..48908ea 100644
            std::swap(width, height);
          }
  
-@@ -784,6 +862,8 @@ const wl_output_listener ELinuxWindowWayland::kWlOutputListener = {
+@@ -784,6 +861,8 @@ const wl_output_listener ELinuxWindowWayland::kWlOutputListener = {
      },
      .done = [](void* data, wl_output* wl_output) -> void {
        ELINUX_LOG(TRACE) << "wl_output_listener.done";
@@ -272,14 +272,20 @@ index a124841..48908ea 100644
      },
      .scale = [](void* data, wl_output* wl_output, int32_t scale) -> void {
        ELINUX_LOG(TRACE) << "wl_output_listener.scale";
-@@ -1165,6 +1245,14 @@ ELinuxWindowWayland::ELinuxWindowWayland(
+@@ -1165,6 +1244,20 @@ ELinuxWindowWayland::ELinuxWindowWayland(
    }
    SetRotation(view_properties_.view_rotation);
  
 +  // Lipstick reports rotation only through the wl_output transform. Follow it
 +  // unless a fixed rotation was requested.
-+  // FLUTTER_SFOS_ROTATION=0 turns this off.
-+  if (view_properties_.view_rotation == FlutterDesktopViewRotation::kRotation_0) {
++  // FLUTTER_SFOS_ROTATION=0 turns this off, and so does FLUTTER_SFOS_SHELL=xdg,
++  // which keeps xdg_shell and the upstream behaviour.
++  {
++    const char* env = std::getenv("FLUTTER_SFOS_SHELL");
++    force_xdg_shell_ = env && std::strcmp(env, "xdg") == 0;
++  }
++  if (view_properties_.view_rotation == FlutterDesktopViewRotation::kRotation_0 &&
++      !force_xdg_shell_) {
 +    const char* env = std::getenv("FLUTTER_SFOS_ROTATION");
 +    follow_output_transform_ = !(env && std::strcmp(env, "0") == 0);
 +  }
@@ -287,7 +293,7 @@ index a124841..48908ea 100644
    auto xcursor_size_string = std::getenv(kXcursorSizeEnvironmentKey);
    cursor_size_ =
        xcursor_size_string ? atoi(xcursor_size_string) : kDefaultPointerSize;
-@@ -1336,6 +1424,16 @@ ELinuxWindowWayland::~ELinuxWindowWayland() {
+@@ -1336,6 +1429,16 @@ ELinuxWindowWayland::~ELinuxWindowWayland() {
      xdg_wm_base_ = nullptr;
    }
  
@@ -304,28 +310,24 @@ index a124841..48908ea 100644
    if (wl_compositor_) {
      wl_compositor_destroy(wl_compositor_);
      wl_compositor_ = nullptr;
-@@ -1461,7 +1559,19 @@ bool ELinuxWindowWayland::CreateRenderSurface(int32_t width_px,
+@@ -1461,7 +1564,15 @@ bool ELinuxWindowWayland::CreateRenderSurface(int32_t width_px,
      return false;
    }
  
 -  if (!xdg_wm_base_) {
 +  // Sailfish: native apps use wl_shell with the Qt surface extension, and
 +  // Lipstick only treats set_buffer_transform as the content orientation for
-+  // those surfaces. FLUTTER_SFOS_SHELL=xdg keeps xdg_shell.
-+  {
-+    const char* env = std::getenv("FLUTTER_SFOS_SHELL");
-+    const bool force_xdg = env && std::strcmp(env, "xdg") == 0;
-+    use_wl_shell_ =
-+        !force_xdg && wl_shell_ && qt_surface_extension_ &&
-+        view_properties_.view_mode == FlutterDesktopViewMode::kFullscreen;
-+  }
++  // those surfaces.
++  use_wl_shell_ =
++      !force_xdg_shell_ && wl_shell_ && qt_surface_extension_ &&
++      view_properties_.view_mode == FlutterDesktopViewMode::kFullscreen;
 +  ELINUX_LOG(INFO) << "Shell: " << (use_wl_shell_ ? "wl_shell" : "xdg_shell");
 +
 +  if (!use_wl_shell_ && !xdg_wm_base_) {
      ELINUX_LOG(ERROR) << "Xdg-shell is invalid";
      return false;
    }
-@@ -1498,23 +1608,57 @@ bool ELinuxWindowWayland::CreateRenderSurface(int32_t width_px,
+@@ -1498,23 +1609,57 @@ bool ELinuxWindowWayland::CreateRenderSurface(int32_t width_px,
        wl_compositor_, width_px, height_px, view_properties_.enable_vsync);
  
    wl_surface_add_listener(native_window_->Surface(), &kWlSurfaceListener, this);
@@ -397,7 +399,7 @@ index a124841..48908ea 100644
    wl_surface_set_buffer_scale(native_window_->Surface(), current_scale_);
  
    {
-@@ -1530,10 +1674,18 @@ bool ELinuxWindowWayland::CreateRenderSurface(int32_t width_px,
+@@ -1530,10 +1675,18 @@ bool ELinuxWindowWayland::CreateRenderSurface(int32_t width_px,
    }
  
    if (view_properties_.view_mode == FlutterDesktopViewMode::kFullscreen) {
@@ -418,7 +420,7 @@ index a124841..48908ea 100644
    wl_surface_commit(native_window_->Surface());
  
    render_surface_ = std::make_unique<SurfaceGl>(std::make_unique<ContextEgl>(
-@@ -1541,7 +1693,7 @@ bool ELinuxWindowWayland::CreateRenderSurface(int32_t width_px,
+@@ -1541,7 +1694,7 @@ bool ELinuxWindowWayland::CreateRenderSurface(int32_t width_px,
        enable_impeller));
    render_surface_->SetNativeWindow(native_window_.get());
  
@@ -427,7 +429,7 @@ index a124841..48908ea 100644
      if (zxdg_decoration_manager_v1_) {
        ELINUX_LOG(INFO) << "Use server-side xdg-decoration mode";
        zxdg_toplevel_decoration_v1_ =
-@@ -1594,6 +1746,16 @@ void ELinuxWindowWayland::DestroyRenderSurface() {
+@@ -1594,6 +1747,16 @@ void ELinuxWindowWayland::DestroyRenderSurface() {
      xdg_surface_ = nullptr;
    }
  
@@ -444,7 +446,7 @@ index a124841..48908ea 100644
    if (wl_cursor_surface_) {
      wl_surface_destroy(wl_cursor_surface_);
      wl_cursor_surface_ = nullptr;
-@@ -1608,6 +1770,47 @@ void ELinuxWindowWayland::UpdateVirtualKeyboardArea(int32_t x,
+@@ -1608,6 +1771,47 @@ void ELinuxWindowWayland::UpdateVirtualKeyboardArea(int32_t x,
                                                      int32_t y,
                                                      int32_t width,
                                                      int32_t height) {
@@ -492,7 +494,7 @@ index a124841..48908ea 100644
    double inset = 0.0;
    const int32_t win_h = static_cast<int32_t>(GetCurrentHeight());
    if (width > 0 && height > 0 && win_h > 0) {
-@@ -1774,6 +1977,19 @@ void ELinuxWindowWayland::WlRegistryHandler(wl_registry* wl_registry,
+@@ -1774,6 +1978,19 @@ void ELinuxWindowWayland::WlRegistryHandler(wl_registry* wl_registry,
      return;
    }
  
@@ -512,7 +514,7 @@ index a124841..48908ea 100644
    if (!strcmp(interface, wl_seat_interface.name)) {
      constexpr uint32_t kMaxVersion = 4;
      auto [inserted, _] =
-@@ -2086,6 +2302,75 @@ bool ELinuxWindowWayland::IsCoverConfigure(int32_t width,
+@@ -2086,6 +2303,83 @@ bool ELinuxWindowWayland::IsCoverConfigure(int32_t width,
    return conf_long * 5 < disp_long * 4;
  }
  
@@ -521,7 +523,7 @@ index a124841..48908ea 100644
 +  // portrait app cover, so draw portrait while shown as a cover.
 +  const int32_t target =
 +      shown_as_cover_ ? WL_OUTPUT_TRANSFORM_NORMAL : transform_;
-+  if (!follow_output_transform_ || target == applied_transform_) {
++  if (!FollowsOutputTransform() || target == applied_transform_) {
 +    return;
 +  }
 +
@@ -572,6 +574,14 @@ index a124841..48908ea 100644
 +  }
 +}
 +
++bool ELinuxWindowWayland::FollowsOutputTransform() const {
++  // Only the wl_shell path can tell Lipstick the content orientation. The
++  // globals are bound before any wl_output event arrives, so this also holds
++  // for the first transform during start-up.
++  return follow_output_transform_ && wl_shell_ && qt_surface_extension_ &&
++         view_properties_.view_mode == FlutterDesktopViewMode::kFullscreen;
++}
++
 +int32_t ELinuxWindowWayland::GetContentOrientationAngle() const {
 +  switch (applied_transform_) {
 +    case WL_OUTPUT_TRANSFORM_90:
@@ -589,7 +599,7 @@ index a124841..48908ea 100644
    if (device_pixel_ratio_locked_ || output_physical_width_mm_ <= 0 ||
        output_mode_width_ <= 0) {
 diff --git a/src/flutter/shell/platform/linux_embedded/window/elinux_window_wayland.h b/src/flutter/shell/platform/linux_embedded/window/elinux_window_wayland.h
-index 7ee13d4..573dd8f 100644
+index 7ee13d4..cd1013a 100644
 --- a/src/flutter/shell/platform/linux_embedded/window/elinux_window_wayland.h
 +++ b/src/flutter/shell/platform/linux_embedded/window/elinux_window_wayland.h
 @@ -22,6 +22,7 @@
@@ -610,17 +620,18 @@ index 7ee13d4..573dd8f 100644
    // |FlutterWindowBindingHandler|
    void UpdateVirtualKeyboardArea(int32_t x,
                                   int32_t y,
-@@ -127,6 +131,9 @@ class ELinuxWindowWayland : public ELinuxWindow, public WindowBindingHandler {
+@@ -127,6 +131,10 @@ class ELinuxWindowWayland : public ELinuxWindow, public WindowBindingHandler {
  
    void MaybeUpdateDevicePixelRatio();
  
 +  // Follows the wl_output transform that Lipstick sends on rotation.
 +  void MaybeApplyOutputTransform();
++  bool FollowsOutputTransform() const;
 +
    bool IsCoverConfigure(int32_t width, int32_t height) const;
  
    void CreateDecoration(int32_t width_dip, int32_t height_dip);
-@@ -138,6 +145,8 @@ class ELinuxWindowWayland : public ELinuxWindow, public WindowBindingHandler {
+@@ -138,6 +146,8 @@ class ELinuxWindowWayland : public ELinuxWindow, public WindowBindingHandler {
    static const xdg_wm_base_listener kXdgWmBaseListener;
    static const xdg_surface_listener kXdgSurfaceListener;
    static const xdg_toplevel_listener kXdgToplevelListener;
@@ -629,7 +640,7 @@ index 7ee13d4..573dd8f 100644
    static const wl_surface_listener kWlSurfaceListener;
    static const wl_seat_listener kWlSeatListener;
    static const wl_pointer_listener kWlPointerListener;
-@@ -239,6 +248,20 @@ class ELinuxWindowWayland : public ELinuxWindow, public WindowBindingHandler {
+@@ -239,6 +249,20 @@ class ELinuxWindowWayland : public ELinuxWindow, public WindowBindingHandler {
    int32_t output_mode_width_ = 0;
    bool device_pixel_ratio_locked_ = false;
    double keyboard_inset_bottom_ = 0;
@@ -641,11 +652,11 @@ index 7ee13d4..573dd8f 100644
 +  // like native Silica apps. Lipstick only treats set_buffer_transform as the
 +  // content orientation for these; it rotates xdg_shell buffers back instead.
 +  bool use_wl_shell_ = false;
++  bool force_xdg_shell_ = false;
 +  wl_shell* wl_shell_ = nullptr;
 +  wl_shell_surface* wl_shell_surface_ = nullptr;
 +  qt_surface_extension* qt_surface_extension_ = nullptr;
 +  qt_extended_surface* qt_extended_surface_ = nullptr;
-+  int32_t onscreen_visibility_ = -1;
 +  bool shown_as_cover_ = false;
  };
  
