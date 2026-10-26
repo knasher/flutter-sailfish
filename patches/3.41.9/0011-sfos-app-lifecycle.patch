@@ -1,0 +1,152 @@
+Report the app's lifecycle to Flutter (needs 0007, 0010).
+
+Lipstick tells the main window how it's shown through the Qt surface
+extension's onscreen_visibility: 5 in front, 3 only as the app's cover
+(its thumbnail in the tile), 0 not at all (minimised behind a cover window,
+screen off, another app in front). These are now passed on as Flutter's app
+lifecycle on flutter/lifecycle: 5 resumed, 3 hidden, 0 paused, and resumed
+at start-up, since Lipstick only reports changes. The framework fills in the
+states between (inactive, hidden).
+
+So apps in the background stop drawing frames and running animations, and
+can react (save state, pause playback). Covers keep updating while the app
+is paused, since they're drawn off-screen.
+
+There's no "visible but not active" value: a cancelled edge swipe doesn't
+change the main window's visibility.
+
+diff --git a/src/flutter/shell/platform/linux_embedded/flutter_elinux_view.cc b/src/flutter/shell/platform/linux_embedded/flutter_elinux_view.cc
+index fa34e68..c55f4d5 100644
+--- a/src/flutter/shell/platform/linux_embedded/flutter_elinux_view.cc
++++ b/src/flutter/shell/platform/linux_embedded/flutter_elinux_view.cc
+@@ -140,6 +140,29 @@ void FlutterELinuxView::OnContentOrientationChanged() {
+   }
+ }
+ 
++void FlutterELinuxView::OnAppVisibilityChanged(AppVisibility visibility) {
++  if (!lifecycle_handler_ || app_visibility_ == visibility) {
++    return;
++  }
++  app_visibility_ = visibility;
++  // The framework fills in the states between, e.g. inactive and hidden
++  // between resumed and paused.
++  switch (visibility) {
++    case AppVisibility::kForeground:
++      ELINUX_LOG(INFO) << "App lifecycle: resumed";
++      lifecycle_handler_->OnResumed();
++      break;
++    case AppVisibility::kThumbnail:
++      ELINUX_LOG(INFO) << "App lifecycle: hidden";
++      lifecycle_handler_->OnHidden();
++      break;
++    case AppVisibility::kBackground:
++      ELINUX_LOG(INFO) << "App lifecycle: paused";
++      lifecycle_handler_->OnPaused();
++      break;
++  }
++}
++
+ void FlutterELinuxView::OnCoverChanged() {
+   if (cover_handler_) {
+     cover_handler_->SendCoverState();
+@@ -438,6 +461,8 @@ void FlutterELinuxView::SendInitialBounds() {
+   if (cover_handler_) {
+     cover_handler_->SendCoverState();
+   }
++  // The app starts in front; the compositor only reports changes.
++  OnAppVisibilityChanged(AppVisibility::kForeground);
+ }
+ 
+ // Set's |event_data|'s phase to either kMove or kHover depending on the current
+diff --git a/src/flutter/shell/platform/linux_embedded/flutter_elinux_view.h b/src/flutter/shell/platform/linux_embedded/flutter_elinux_view.h
+index 2ab7d2b..c9e5eec 100644
+--- a/src/flutter/shell/platform/linux_embedded/flutter_elinux_view.h
++++ b/src/flutter/shell/platform/linux_embedded/flutter_elinux_view.h
+@@ -6,6 +6,7 @@
+ #define FLUTTER_SHELL_PLATFORM_LINUX_EMBEDDED_FLUTTER_ELINUX_VIEW_H_
+ 
+ #include <memory>
++#include <optional>
+ #include <string>
+ #include <vector>
+ 
+@@ -99,6 +100,9 @@ class FlutterELinuxView : public WindowBindingHandlerDelegate {
+   // |WindowBindingHandlerDelegate|
+   void OnCoverChanged() override;
+ 
++  // |WindowBindingHandlerDelegate|
++  void OnAppVisibilityChanged(AppVisibility visibility) override;
++
+   // |WindowBindingHandlerDelegate|
+   void OnPointerMove(double x_px, double y_px) override;
+ 
+@@ -308,6 +312,9 @@ class FlutterELinuxView : public WindowBindingHandlerDelegate {
+   // Handler for app lifecycle events.
+   std::unique_ptr<flutter::LifecyclePlugin> lifecycle_handler_;
+ 
++  // Last app visibility passed on as a lifecycle state.
++  std::optional<AppVisibility> app_visibility_;
++
+   // Handler for flutter/navigation channel.
+   std::unique_ptr<flutter::NavigationPlugin> navigation_handler_;
+ 
+diff --git a/src/flutter/shell/platform/linux_embedded/window/elinux_window_wayland.cc b/src/flutter/shell/platform/linux_embedded/window/elinux_window_wayland.cc
+index 1253d22..65eeb77 100644
+--- a/src/flutter/shell/platform/linux_embedded/window/elinux_window_wayland.cc
++++ b/src/flutter/shell/platform/linux_embedded/window/elinux_window_wayland.cc
+@@ -292,15 +292,25 @@ const qt_extended_surface_listener
+                   << "qt_extended_surface.onscreen_visibility: " << visible;
+               auto self = reinterpret_cast<ELinuxWindowWayland*>(data);
+               // Undocumented; observed on SFOS 5.2: 5 in the foreground, 3
+-              // while shown as an app cover, 0 when hidden (also while
+-              // minimised, when the home screen is off-screen or dimmed).
+-              // Bit 2 is taken to mean "cover". Hidden keeps the current
+-              // state, so the window doesn't turn while nobody can see it
+-              // and then show up turned in its tile.
++              // while shown as the app's cover (its thumbnail in the tile),
++              // 0 when not shown at all (minimised behind a cover window,
++              // screen off, home screen off-view, another app in front).
++              // Bit 2 is taken to mean "cover".
++              const bool cover = (visible & 2) != 0;
++              if (self->binding_handler_delegate_) {
++                using AppVisibility =
++                    WindowBindingHandlerDelegate::AppVisibility;
++                self->binding_handler_delegate_->OnAppVisibilityChanged(
++                    visible == 0 ? AppVisibility::kBackground
++                    : cover      ? AppVisibility::kThumbnail
++                                 : AppVisibility::kForeground);
++              }
++              // Hidden keeps the current orientation, so the window doesn't
++              // turn while nobody can see it and then show up turned in its
++              // tile.
+               if (visible == 0) {
+                 return;
+               }
+-              const bool cover = (visible & 2) != 0;
+               self->SetShownAsCover(cover);
+             },
+         .set_generic_property =
+diff --git a/src/flutter/shell/platform/linux_embedded/window_binding_handler_delegate.h b/src/flutter/shell/platform/linux_embedded/window_binding_handler_delegate.h
+index 4f3011c..8817c47 100644
+--- a/src/flutter/shell/platform/linux_embedded/window_binding_handler_delegate.h
++++ b/src/flutter/shell/platform/linux_embedded/window_binding_handler_delegate.h
+@@ -26,6 +26,19 @@ class WindowBindingHandlerDelegate {
+   // changed size (Sailfish OS).
+   virtual void OnCoverChanged() {}
+ 
++  // How the compositor shows the app (Sailfish OS).
++  enum class AppVisibility {
++    // In front.
++    kForeground,
++    // Only as a thumbnail, such as its tile on the home screen.
++    kThumbnail,
++    // Not at all: minimised behind a cover window, screen off, and so on.
++    kBackground,
++  };
++
++  // Notifies delegate that the compositor shows the app differently.
++  virtual void OnAppVisibilityChanged(AppVisibility visibility) {}
++
+   // Notifies delegate that backing window mouse has moved. Typically called by
+   // currently configured WindowBindingHandler
+   // @param[in] x_px The x coordinate of the pointer event in physical pixels.

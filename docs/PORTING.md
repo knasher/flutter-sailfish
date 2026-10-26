@@ -169,3 +169,20 @@ window, which Lipstick shows in the tile instead of the app's window, so
 opening the app is as smooth as for native apps. `flutter-sfos/cover` tells
 the app whether it can have a cover, whether it's shown and its size, and
 carries the buttons and their taps.
+
+## App lifecycle
+
+Works without app code. Apps get Flutter's usual lifecycle states, so
+`AppLifecycleListener` and `WidgetsBindingObserver.didChangeAppLifecycleState`
+behave as on Android and iOS:
+
+- **resumed** while the app is in front;
+- **hidden** while it's only shown as its tile on the home screen (apps
+  without a cover);
+- **paused** while it isn't shown at all: minimised behind its cover,
+  another app in front, or the screen off.
+
+When hidden or paused, the app stops drawing frames and animations stop, which
+saves battery; timers and other Dart code keep running. A cover set with
+`SailfishCover` keeps updating while the app is paused. Needs a `flutter-sfos`
+runtime with patch 0011.
