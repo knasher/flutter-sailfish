@@ -189,6 +189,33 @@ saves battery; timers and other Dart code keep running. A cover set with
 `SailfishCover` keeps updating while the app is paused. Needs a `flutter-sfos`
 runtime with patch 0011.
 
+## Plugins
+
+Flutter apps on Sailfish OS are Linux apps to Dart (`Platform.isLinux`), and
+flutter-elinux builds them with the Linux plugin registrant. So:
+
+- **Pure-Dart plugins** work as they are.
+- **Plugins with a Dart-only Linux version** (`dartPluginClass` for `linux`,
+  e.g. path_provider_linux, shared_preferences_linux, package_info_plus,
+  connectivity_plus, geolocator_linux) are registered automatically. Whether
+  they work depends on what they use on Linux: GNOME's NetworkManager or
+  GeoClue2, for instance, aren't on Sailfish OS, and Sailjail limits where
+  apps can write.
+- **Plugins with native Linux code** (C++/GTK, e.g. url_launcher_linux,
+  flutter_secure_storage_linux) and plugins with no Linux version at all
+  (Firebase, video_player, screen_brightness) aren't available: calling them
+  throws (`MissingPluginException`, a channel `PlatformException` or
+  `UnimplementedError`).
+
+Sailfish versions of standard plugins are separate packages in
+[packages/](../packages), one per plugin. They are `elinux` Dart plugins:
+flutter-elinux registers them after the Linux ones, in Sailfish builds only.
+Add the ones you use next to the plugin itself:
+
+| Plugin | Sailfish package | Notes |
+|---|---|---|
+| path_provider | [path_provider_sailfish](../packages/path_provider_sailfish) | The app's Sailjail folders |
+
 ## Sandboxing (Sailjail)
 
 Apps run in Sailjail's sandbox, like native ones. The `[X-Sailjail]` section

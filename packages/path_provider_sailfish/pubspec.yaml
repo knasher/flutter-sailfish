@@ -1,0 +1,27 @@
+name: path_provider_sailfish
+description: Sailfish OS implementation of path_provider. Apps get the folders Sailjail lets them write to.
+version: 0.1.0
+# Not published yet.
+publish_to: none
+
+environment:
+  sdk: ^3.11.5
+  flutter: ">=3.41.0"
+
+dependencies:
+  flutter:
+    sdk: flutter
+  path_provider_platform_interface: ^2.1.0
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+
+# flutter-elinux registers elinux Dart plugins after Flutter registers the
+# Linux ones, so on Sailfish OS this replaces path_provider_linux.
+flutter:
+  plugin:
+    implements: path_provider
+    platforms:
+      elinux:
+        dartPluginClass: PathProviderSailfish
