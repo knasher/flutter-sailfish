@@ -216,6 +216,7 @@ Add the ones you use next to the plugin itself:
 |---|---|---|
 | path_provider | [path_provider_sailfish](../packages/path_provider_sailfish) | The app's Sailjail folders |
 | shared_preferences | [shared_preferences_sailfish](../packages/shared_preferences_sailfish) | Kept in the app's data folder |
+| flutter_secure_storage | [flutter_secure_storage_sailfish](../packages/flutter_secure_storage_sailfish) | A private file, not encrypted ([how safe](../packages/flutter_secure_storage_sailfish/README.md#how-safe-it-is)) |
 
 ## Sandboxing (Sailjail)
 
