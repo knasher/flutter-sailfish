@@ -86,12 +86,17 @@ final _padding = ValueNotifier<EdgeInsets>(EdgeInsets.zero); // physical px
 
 void listenForDisplayCutouts() {
   const BasicMessageChannel<Object?>(
-          'flutter-sfos/display_cutouts', JSONMessageCodec())
-      .setMessageHandler((message) async {
+    'flutter-sfos/display_cutouts',
+    JSONMessageCodec(),
+  ).setMessageHandler((message) async {
     final p = (message! as Map)['padding'] as Map;
     double v(String k) => (p[k] as num).toDouble();
-    _padding.value =
-        EdgeInsets.fromLTRB(v('left'), v('top'), v('right'), v('bottom'));
+    _padding.value = EdgeInsets.fromLTRB(
+      v('left'),
+      v('top'),
+      v('right'),
+      v('bottom'),
+    );
     return null;
   });
 }
@@ -114,15 +119,31 @@ Widget cutoutPadding(BuildContext context, Widget? child) {
 }
 ```
 
-and use it in `main()`:
+then, in `lib/main.dart`, import it and start listening before `runApp`:
 
 ```dart
+import 'sfos_cutouts.dart';
+
 void main() {
-  WidgetsFlutterBinding.ensureInitialized();
+  WidgetsFlutterBinding.ensureInitialized(); // needed before using a channel
   listenForDisplayCutouts();
-  runApp(MaterialApp(builder: cutoutPadding, home: const MyHomePage()));
+  runApp(const MyApp());
 }
 ```
+
+and add the builder wherever the app creates its `MaterialApp` (in
+`MyApp.build` for a project made with `flutter create`):
+
+```dart
+return MaterialApp(
+  builder: cutoutPadding,
+  title: 'Flutter Demo',
+  // ...the rest unchanged
+);
+```
+
+If the `MaterialApp` already has a `builder`, wrap it:
+`builder: (context, child) => cutoutPadding(context, yourBuilder(context, child))`.
 
 `AppBar` then draws its background behind the cut-out and keeps its contents
 below it, and `SafeArea` and scroll views keep clear of it, as on a phone with
