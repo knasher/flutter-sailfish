@@ -57,15 +57,64 @@ RPMs plus `elinux/`, `rpm/`, and `.sfosbuild/`.
 
 See `examples/hello/` (`./elinux/build.sh`).
 
-## Camera cut-outs
+## Sailfish features: the flutter_sailfish package
 
-Apps run full screen, so content is drawn under the camera cut-out. The
-runtime reads the cut-out from the device's Silica settings and sends it on the
-`flutter-sfos/display_cutouts` channel, but the Flutter embedder API can't set
-`MediaQuery.padding`, so the app has to apply it.
+Features only Sailfish has, such as app covers, and fixes that need app code,
+such as display cut-outs, are in the Dart package `packages/flutter_sailfish`.
+It isn't on pub.dev yet, so add it as a git dependency:
 
-The message is JSON, in physical pixels for the current orientation. It is sent
-at start-up and whenever the orientation changes:
+```yaml
+dependencies:
+  flutter_sailfish:
+    git:
+      url: https://github.com/knasher/flutter-sailfish.git
+      path: packages/flutter_sailfish
+```
+
+On other platforms nothing answers its channels, so it does nothing there and
+needs no platform checks.
+
+Apps built through this repo's Makefile (`make FLUTTER=<ver> app APP=<dir>`)
+use the copy in `packages/flutter_sailfish` instead, so the package matches
+the runtime built here. `./elinux/build.sh` does the same when
+`FLUTTER_SAILFISH_PATH` points at a copy: it copies the package into the app
+(the build container only sees the app's folder) and writes a marked
+`pubspec_overrides.yaml`. Add both to the app's `.gitignore`:
+
+```
+/.flutter_sailfish/
+/pubspec_overrides.yaml
+```
+
+`examples/hello/` uses both features.
+
+### Camera cut-outs
+
+Apps run full screen, so content is drawn under the camera cut-out, and the
+Flutter embedder API can't set `MediaQuery.padding`. Use the package's builder
+wherever the app creates its `MaterialApp` (in `MyApp.build` for a project made
+with `flutter create`):
+
+```dart
+import 'package:flutter_sailfish/flutter_sailfish.dart';
+
+return MaterialApp(
+  builder: SailfishCutouts.builder,
+  // ...the rest unchanged
+);
+```
+
+If the `MaterialApp` already has a `builder`, wrap it:
+`builder: (context, child) => SailfishCutouts.builder(context, yourBuilder(context, child))`.
+
+`AppBar` then draws its background behind the cut-out and keeps its contents
+below it, and `SafeArea` and scroll views keep clear of it, as on a phone with
+a notch. Needs a `flutter-sfos` runtime with patch 0009.
+
+How it works: the runtime reads the cut-outs from the device's Silica settings
+and sends them, at start-up and whenever the orientation changes, as JSON on
+`flutter-sfos/display_cutouts`, in physical pixels for the current
+orientation (`version` changes only if the format changes incompatibly):
 
 ```json
 {"version": 1,
@@ -74,78 +123,49 @@ at start-up and whenever the orientation changes:
 }
 ```
 
-`version` changes only if the format changes incompatibly.
+### App covers
 
-Add `lib/sfos_cutouts.dart`:
-
-```dart
-import 'package:flutter/material.dart';
-import 'package:flutter/services.dart';
-
-final _padding = ValueNotifier<EdgeInsets>(EdgeInsets.zero); // physical px
-
-void listenForDisplayCutouts() {
-  const BasicMessageChannel<Object?>(
-    'flutter-sfos/display_cutouts',
-    JSONMessageCodec(),
-  ).setMessageHandler((message) async {
-    final p = (message! as Map)['padding'] as Map;
-    double v(String k) => (p[k] as num).toDouble();
-    _padding.value = EdgeInsets.fromLTRB(
-      v('left'),
-      v('top'),
-      v('right'),
-      v('bottom'),
-    );
-    return null;
-  });
-}
-
-Widget cutoutPadding(BuildContext context, Widget? child) {
-  return ValueListenableBuilder<EdgeInsets>(
-    valueListenable: _padding,
-    builder: (context, padding, _) {
-      final mq = MediaQuery.of(context);
-      final extra = padding / mq.devicePixelRatio;
-      return MediaQuery(
-        data: mq.copyWith(
-          padding: mq.padding + extra,
-          viewPadding: mq.viewPadding + extra,
-        ),
-        child: child!,
-      );
-    },
-  );
-}
-```
-
-then, in `lib/main.dart`, import it and start listening before `runApp`:
+The cover is what the home screen shows in the app's tile while the app is in
+the background. Without one, the home screen shows a shrunken copy of the app.
+Set it in `main()`:
 
 ```dart
-import 'sfos_cutouts.dart';
+import 'package:flutter_sailfish/flutter_sailfish.dart';
 
 void main() {
   WidgetsFlutterBinding.ensureInitialized(); // needed before using a channel
-  listenForDisplayCutouts();
+  SailfishCover.set(
+    const MyCover(),
+    actions: [
+      CoverAction(icon: 'icon-cover-refresh', onPressed: refresh),
+    ],
+  );
   runApp(const MyApp());
 }
 ```
 
-and add the builder wherever the app creates its `MaterialApp` (in
-`MyApp.build` for a project made with `flutter create`):
+- **Size.** The cover is an ordinary widget, laid out at the tile's size:
+  about 446×714 pixels with four or fewer apps open and 284×454 with more (on
+  the Jolla Phone 2026). The home screen resizes it when the number of apps
+  changes, so lay it out for both; `MediaQuery` gives the size.
+- **State.** It has its own widget tree, separate from the app's, so give it
+  the app's state through listenables such as `ValueNotifier`s rather than
+  inherited widgets (see `CounterCover` in `examples/hello/lib/main.dart`).
+- **When it's drawn.** Once when set, then only while the home screen shows
+  it: again whenever it changes, for example on `setState`.
+  `SailfishCover.visible` says when it's shown, for example to run a clock
+  only then. Covers are meant for occasional updates, not animation.
+- **Buttons.** The home screen draws `CoverAction`s along the bottom of the
+  cover from Sailfish theme icons (`icon-cover-new`, `-refresh`, `-next`,
+  `-pause`, `-play`, …; the package README lists them all), so leave room
+  there. Taps call `onPressed`, and don't open the app.
 
-```dart
-return MaterialApp(
-  builder: cutoutPadding,
-  title: 'Flutter Demo',
-  // ...the rest unchanged
-);
-```
+Needs a `flutter-sfos` runtime with patch 0010. Not tried yet in apps run
+under Sailjail; the cover buttons need the app to own a D-Bus name.
 
-If the `MaterialApp` already has a `builder`, wrap it:
-`builder: (context, child) => cutoutPadding(context, yourBuilder(context, child))`.
-
-`AppBar` then draws its background behind the cut-out and keeps its contents
-below it, and `SafeArea` and scroll views keep clear of it, as on a phone with
-a notch. On other platforms nothing is sent and nothing changes. Needs a
-`flutter-sfos` runtime with patch 0009.
+How it works: the package draws the cover off-screen and sends the picture on
+`flutter-sfos/cover_frame`; the first one makes the runtime create a cover
+window, which Lipstick shows in the tile instead of the app's window, so
+opening the app is as smooth as for native apps. `flutter-sfos/cover` tells
+the app whether it can have a cover, whether it's shown and its size, and
+carries the buttons and their taps.
