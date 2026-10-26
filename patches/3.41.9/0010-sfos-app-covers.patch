@@ -1,0 +1,1230 @@
+Give apps a Sailfish app cover (needs 0007, 0009).
+
+Apps send pictures of their cover on the binary channel
+flutter-sfos/cover_frame: width and height as little-endian uint32, then
+RGBA with premultiplied alpha. The first picture creates a cover window: a
+second wl_shell surface, transient for the main one, with the Qt surface
+extension properties Silica apps use (cover: CATEGORY "cover", WINID 2;
+main window: WINID 1, SAILFISH_COVER_WINDOW "__winref:2",
+SAILFISH_HAVE_COVER). Lipstick then shows it in the app's tile instead of
+the main window, and swaps the two itself when the app is opened, as for
+native apps. Pictures go into wl_shm buffers. Lipstick's configure sets the
+size, which depends on how many apps are open (446x714 or 284x454 on the
+Jolla Phone 2026).
+
+The JSON channel flutter-sfos/cover tells the app whether it can have a
+cover, whether Lipstick shows it and its size, so it only draws the cover
+when needed:
+
+  {"version": 1, "available": true, "visible": false,
+   "width": 446, "height": 714}
+
+Apps can also give the cover buttons:
+
+  {"version": 1, "actions": [{"id": 0, "icon": "icon-cover-refresh"}]}
+
+The home screen draws them from the main window's _APP_COVER_ACTION
+property and, when one is tapped, calls trigger(id) on a D-Bus name the
+runtime owns (org.sailfishos.coveraction.<app>.pid<pid>.id1). The call
+names no interface, so it's caught with a GDBus filter. The tap reaches the
+app as {"version": 1, "action": id}.
+
+Apps without a cover window are still shown as their main window. That
+window now keeps its orientation while it's the cover, instead of turning
+portrait (0007), which Lipstick animated in the tile.
+
+The Dart side is the flutter_sailfish package (see docs/PORTING.md).
+
+diff --git a/cmake/build.cmake b/cmake/build.cmake
+index 120368a..9905a1d 100644
+--- a/cmake/build.cmake
++++ b/cmake/build.cmake
+@@ -83,8 +83,10 @@ else()
+     "${_wayland_protocols_src_dir}/presentation-time-protocol.c"
+     "${_wayland_protocols_src_dir}/xdg-decoration-unstable-v1-protocol.c"
+     "${_wayland_protocols_src_dir}/surface-extension-protocol.c"
++    "src/flutter/shell/platform/linux_embedded/window/cover_window_wayland.cc"
+     "src/flutter/shell/platform/linux_embedded/window/elinux_window_wayland.cc"
+     "src/flutter/shell/platform/linux_embedded/window/native_window_wayland.cc"
++    "src/flutter/shell/platform/linux_embedded/window/qt_window_properties.cc"
+     "src/flutter/shell/platform/linux_embedded/window/native_window_wayland_decoration.cc"
+     "src/flutter/shell/platform/linux_embedded/window/renderer/elinux_shader.cc"
+     "src/flutter/shell/platform/linux_embedded/window/renderer/elinux_shader_context.cc"
+@@ -157,6 +159,7 @@ set(ELINUX_COMMON_SRC
+   "src/flutter/shell/platform/linux_embedded/external_texture_egl_image.cc"
+   "src/flutter/shell/platform/linux_embedded/vsync_waiter.cc"
+   "src/flutter/shell/platform/linux_embedded/flutter_elinux_texture_registrar.cc"
++  "src/flutter/shell/platform/linux_embedded/plugins/cover_plugin.cc"
+   "src/flutter/shell/platform/linux_embedded/plugins/display_cutout_plugin.cc"
+   "src/flutter/shell/platform/linux_embedded/plugins/keyboard_glfw_util.cc"
+   "src/flutter/shell/platform/linux_embedded/plugins/key_event_plugin.cc"
+@@ -242,6 +245,7 @@ target_include_directories(${TARGET}
+     ${X11_INCLUDE_DIRS}
+     ${LIBWESTON_INCLUDE_DIRS}
+     ${GLIB_INCLUDE_DIRS}
++    ${GIO_INCLUDE_DIRS}
+     ${MALIIT_GLIB_INCLUDE_DIRS}
+     ## User libraries
+     ${USER_APP_INCLUDE_DIRS}
+@@ -263,6 +267,7 @@ target_link_libraries(${TARGET}
+     ${X11_LIBRARIES}
+     ${LIBWESTON_LIBRARIES}
+     ${GLIB_LIBRARIES}
++    ${GIO_LIBRARIES}
+     ${MALIIT_GLIB_LIBRARIES}
+     ${FLUTTER_EMBEDDER_LIB}
+     ## User libraries
+diff --git a/cmake/package.cmake b/cmake/package.cmake
+index 348df4f..00ece31 100644
+--- a/cmake/package.cmake
++++ b/cmake/package.cmake
+@@ -44,4 +44,5 @@ endif()
+ pkg_check_modules(GLES REQUIRED glesv2)
+ 
+ pkg_check_modules(GLIB REQUIRED glib-2.0)
++pkg_check_modules(GIO REQUIRED gio-2.0)
+ pkg_check_modules(MALIIT_GLIB REQUIRED maliit-glib)
+diff --git a/src/flutter/shell/platform/linux_embedded/flutter_elinux_view.cc b/src/flutter/shell/platform/linux_embedded/flutter_elinux_view.cc
+index 960c65b..fa34e68 100644
+--- a/src/flutter/shell/platform/linux_embedded/flutter_elinux_view.cc
++++ b/src/flutter/shell/platform/linux_embedded/flutter_elinux_view.cc
+@@ -52,6 +52,9 @@ bool FlutterELinuxView::DispatchEvent() {
+   if (textinput_handler_) {
+     textinput_handler_->DispatchEvent();
+   }
++  if (cover_handler_) {
++    cover_handler_->DispatchEvent();
++  }
+   return binding_handler_->DispatchEvent();
+ }
+ 
+@@ -87,6 +90,8 @@ void FlutterELinuxView::SetEngine(std::unique_ptr<FlutterELinuxEngine> engine) {
+       internal_plugin_messenger, binding_handler_.get());
+   display_cutout_handler_ = std::make_unique<flutter::DisplayCutoutPlugin>(
+       internal_plugin_messenger, binding_handler_.get());
++  cover_handler_ = std::make_unique<flutter::CoverPlugin>(
++      internal_plugin_messenger, binding_handler_.get());
+ 
+   PhysicalWindowBounds bounds = binding_handler_->GetPhysicalWindowBounds();
+   SendWindowMetrics(bounds.width, bounds.height,
+@@ -135,6 +140,12 @@ void FlutterELinuxView::OnContentOrientationChanged() {
+   }
+ }
+ 
++void FlutterELinuxView::OnCoverChanged() {
++  if (cover_handler_) {
++    cover_handler_->SendCoverState();
++  }
++}
++
+ void FlutterELinuxView::OnPointerMove(double x_px, double y_px) {
+   auto trimmed_xy = GetPointerRotation(x_px, y_px);
+   SendPointerMove(trimmed_xy.first, trimmed_xy.second);
+@@ -424,6 +435,9 @@ void FlutterELinuxView::SendInitialBounds() {
+   if (display_cutout_handler_) {
+     display_cutout_handler_->SendDisplayCutouts();
+   }
++  if (cover_handler_) {
++    cover_handler_->SendCoverState();
++  }
+ }
+ 
+ // Set's |event_data|'s phase to either kMove or kHover depending on the current
+diff --git a/src/flutter/shell/platform/linux_embedded/flutter_elinux_view.h b/src/flutter/shell/platform/linux_embedded/flutter_elinux_view.h
+index 5aeb25b..2ab7d2b 100644
+--- a/src/flutter/shell/platform/linux_embedded/flutter_elinux_view.h
++++ b/src/flutter/shell/platform/linux_embedded/flutter_elinux_view.h
+@@ -13,6 +13,7 @@
+ #include "flutter/shell/platform/embedder/embedder.h"
+ #include "flutter/shell/platform/linux_embedded/flutter_elinux_engine.h"
+ #include "flutter/shell/platform/linux_embedded/flutter_elinux_state.h"
++#include "flutter/shell/platform/linux_embedded/plugins/cover_plugin.h"
+ #include "flutter/shell/platform/linux_embedded/plugins/display_cutout_plugin.h"
+ #include "flutter/shell/platform/linux_embedded/plugins/key_event_plugin.h"
+ #include "flutter/shell/platform/linux_embedded/plugins/lifecycle_plugin.h"
+@@ -95,6 +96,9 @@ class FlutterELinuxView : public WindowBindingHandlerDelegate {
+   // |WindowBindingHandlerDelegate|
+   void OnContentOrientationChanged() override;
+ 
++  // |WindowBindingHandlerDelegate|
++  void OnCoverChanged() override;
++
+   // |WindowBindingHandlerDelegate|
+   void OnPointerMove(double x_px, double y_px) override;
+ 
+@@ -316,6 +320,9 @@ class FlutterELinuxView : public WindowBindingHandlerDelegate {
+   // Handler for flutter-sfos/display_cutouts channel.
+   std::unique_ptr<flutter::DisplayCutoutPlugin> display_cutout_handler_;
+ 
++  // Handler for flutter-sfos/cover channel.
++  std::unique_ptr<flutter::CoverPlugin> cover_handler_;
++
+   // Currently configured WindowBindingHandler for view.
+   std::unique_ptr<flutter::WindowBindingHandler> binding_handler_;
+ 
+diff --git a/src/flutter/shell/platform/linux_embedded/plugins/cover_plugin.cc b/src/flutter/shell/platform/linux_embedded/plugins/cover_plugin.cc
+new file mode 100644
+index 0000000..0b5dbcf
+--- /dev/null
++++ b/src/flutter/shell/platform/linux_embedded/plugins/cover_plugin.cc
+@@ -0,0 +1,275 @@
++// Copyright 2026 Dave Nash. All rights reserved.
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#include "flutter/shell/platform/linux_embedded/plugins/cover_plugin.h"
++
++#include <errno.h>
++#include <unistd.h>
++
++#include <algorithm>
++#include <cctype>
++
++#include "flutter/shell/platform/common/json_message_codec.h"
++#include "flutter/shell/platform/linux_embedded/logger.h"
++
++namespace flutter {
++
++namespace {
++constexpr char kChannelName[] = "flutter-sfos/cover";
++constexpr char kFrameChannelName[] = "flutter-sfos/cover_frame";
++
++// Bumped on incompatible changes to the messages.
++constexpr int kMessageVersion = 1;
++
++constexpr char kVersion[] = "version";
++constexpr char kAvailable[] = "available";
++constexpr char kVisible[] = "visible";
++constexpr char kWidth[] = "width";
++constexpr char kHeight[] = "height";
++constexpr char kActions[] = "actions";
++constexpr char kAction[] = "action";
++constexpr char kId[] = "id";
++constexpr char kIcon[] = "icon";
++
++// The home screen calls this method, with the button's id, on our service.
++constexpr char kTriggerMethod[] = "trigger";
++
++// Theme icon names (e.g. "icon-cover-refresh") get this prefix.
++constexpr char kThemeIconPrefix[] = "image://theme/";
++
++// Pictures are sent at the cover's size, so anything far bigger is a mistake.
++constexpr uint32_t kMaxFrameSide = 4096;
++
++uint32_t ReadU32(const uint8_t* bytes) {
++  return bytes[0] | (bytes[1] << 8) | (bytes[2] << 16) |
++         (static_cast<uint32_t>(bytes[3]) << 24);
++}
++
++// org.freedesktop.DBus RequestName flag and reply.
++constexpr guint32 kDoNotQueue = 4;
++constexpr guint32 kPrimaryOwner = 1;
++
++// A D-Bus name element: letters, digits and underscores.
++std::string NameElement(const char* name) {
++  std::string out = name ? name : "app";
++  for (auto& c : out) {
++    if (!std::isalnum(static_cast<unsigned char>(c))) {
++      c = '_';
++    }
++  }
++  if (out.empty() || std::isdigit(static_cast<unsigned char>(out[0]))) {
++    out.insert(0, "_");
++  }
++  return out;
++}
++
++// The action list is newline-separated text in an ASCII window property.
++bool IsValidIcon(const std::string& icon) {
++  return !icon.empty() && std::all_of(icon.begin(), icon.end(), [](char c) {
++    return c > ' ' && c < 0x7f;
++  });
++}
++}  // namespace
++
++CoverPlugin::CoverPlugin(BinaryMessenger* messenger,
++                         WindowBindingHandler* delegate)
++    : messenger_(messenger),
++      channel_(std::make_unique<BasicMessageChannel<rapidjson::Document>>(
++          messenger,
++          kChannelName,
++          &JsonMessageCodec::GetInstance())),
++      delegate_(delegate) {
++  channel_->SetMessageHandler(
++      [this](const rapidjson::Document& message,
++             const MessageReply<rapidjson::Document>& reply) {
++        HandleMessage(message);
++        reply(rapidjson::Document());
++      });
++  messenger_->SetMessageHandler(
++      kFrameChannelName,
++      [this](const uint8_t* message, size_t size, BinaryReply reply) {
++        HandleFrame(message, size);
++        if (reply) {
++          reply(nullptr, 0);
++        }
++      });
++}
++
++CoverPlugin::~CoverPlugin() {
++  messenger_->SetMessageHandler(kFrameChannelName, nullptr);
++  if (bus_) {
++    if (filter_id_) {
++      g_dbus_connection_remove_filter(bus_, filter_id_);
++    }
++    g_object_unref(bus_);
++  }
++}
++
++void CoverPlugin::SendCoverState() {
++  const CoverState state = delegate_->GetCoverState();
++  rapidjson::Document message(rapidjson::kObjectType);
++  auto& allocator = message.GetAllocator();
++  message.AddMember(kVersion, kMessageVersion, allocator);
++  message.AddMember(kAvailable, state.available, allocator);
++  message.AddMember(kVisible, state.visible, allocator);
++  message.AddMember(kWidth, state.width, allocator);
++  message.AddMember(kHeight, state.height, allocator);
++  ELINUX_LOG(INFO) << "Cover: " << (state.visible ? "shown" : "hidden") << ", "
++                   << state.width << "x" << state.height;
++  channel_->Send(message);
++}
++
++void CoverPlugin::HandleFrame(const uint8_t* message, size_t size) {
++  if (!message || size < 8) {
++    ELINUX_LOG(ERROR) << "Cover: picture too short";
++    return;
++  }
++  const uint32_t width = ReadU32(message);
++  const uint32_t height = ReadU32(message + 4);
++  if (width == 0 || height == 0 || width > kMaxFrameSide ||
++      height > kMaxFrameSide ||
++      size != 8 + static_cast<size_t>(width) * height * 4) {
++    ELINUX_LOG(ERROR) << "Cover: picture size doesn't match";
++    return;
++  }
++  delegate_->SetCoverFrame(static_cast<int32_t>(width),
++                           static_cast<int32_t>(height), message + 8);
++}
++
++void CoverPlugin::DispatchEvent() {
++  std::vector<int32_t> actions;
++  {
++    std::lock_guard<std::mutex> lock(mutex_);
++    actions.swap(pending_actions_);
++  }
++  for (const int32_t id : actions) {
++    rapidjson::Document message(rapidjson::kObjectType);
++    auto& allocator = message.GetAllocator();
++    message.AddMember(kVersion, kMessageVersion, allocator);
++    message.AddMember(kAction, id, allocator);
++    ELINUX_LOG(INFO) << "Cover action: " << id;
++    channel_->Send(message);
++  }
++}
++
++void CoverPlugin::HandleMessage(const rapidjson::Document& message) {
++  if (!message.IsObject() || !message.HasMember(kActions) ||
++      !message[kActions].IsArray()) {
++    ELINUX_LOG(ERROR) << "Cover: unexpected message";
++    return;
++  }
++
++  // Each button is "<service>\n<method>\n<id>\n<icon>", joined by newlines,
++  // then a trailing "\n0" (as other apps send it).
++  std::string actions;
++  for (const auto& action : message[kActions].GetArray()) {
++    if (!action.IsObject() || !action.HasMember(kId) ||
++        !action[kId].IsInt() || action[kId].GetInt() < 0 ||
++        !action.HasMember(kIcon) || !action[kIcon].IsString()) {
++      ELINUX_LOG(ERROR) << "Cover: each action needs an id and an icon";
++      return;
++    }
++    std::string icon = action[kIcon].GetString();
++    if (!IsValidIcon(icon)) {
++      ELINUX_LOG(ERROR) << "Cover: invalid icon name";
++      return;
++    }
++    if (icon.find("://") == std::string::npos && icon[0] != '/') {
++      icon.insert(0, kThemeIconPrefix);
++    }
++    if (service_.empty() && !RegisterActionService()) {
++      return;
++    }
++    if (!actions.empty()) {
++      actions += "\n";
++    }
++    actions += service_ + "\n" + kTriggerMethod + "\n" +
++               std::to_string(action[kId].GetInt()) + "\n" + icon;
++  }
++  if (!actions.empty()) {
++    actions += "\n0";
++  }
++  delegate_->SetCoverActions(actions);
++}
++
++bool CoverPlugin::RegisterActionService() {
++  GError* error = nullptr;
++  bus_ = g_bus_get_sync(G_BUS_TYPE_SESSION, nullptr, &error);
++  if (!bus_) {
++    ELINUX_LOG(ERROR) << "Cover actions: no session bus: " << error->message;
++    g_clear_error(&error);
++    return false;
++  }
++
++  // The pattern other Sailfish apps use for their cover action service.
++  const std::string service = std::string("org.sailfishos.coveraction.") +
++                              NameElement(program_invocation_short_name) +
++                              ".pid" + std::to_string(getpid()) + ".id1";
++  GVariant* reply = g_dbus_connection_call_sync(
++      bus_, "org.freedesktop.DBus", "/org/freedesktop/DBus",
++      "org.freedesktop.DBus", "RequestName",
++      g_variant_new("(su)", service.c_str(), kDoNotQueue),
++      G_VARIANT_TYPE("(u)"), G_DBUS_CALL_FLAGS_NONE, -1, nullptr, &error);
++  if (!reply) {
++    ELINUX_LOG(ERROR) << "Cover actions: RequestName failed: "
++                      << error->message;
++    g_clear_error(&error);
++    return false;
++  }
++  guint32 result = 0;
++  g_variant_get(reply, "(u)", &result);
++  g_variant_unref(reply);
++  if (result != kPrimaryOwner) {
++    ELINUX_LOG(ERROR) << "Cover actions: could not own " << service;
++    return false;
++  }
++
++  service_ = service;
++  path_ = "/" + service_;
++  std::replace(path_.begin(), path_.end(), '.', '/');
++  // GDBus only routes calls that name an interface to registered objects,
++  // and the home screen's call may not, so catch it with a filter instead.
++  filter_id_ = g_dbus_connection_add_filter(bus_, FilterMessage, this, nullptr);
++  ELINUX_LOG(INFO) << "Cover actions: " << service_;
++  return true;
++}
++
++GDBusMessage* CoverPlugin::FilterMessage(GDBusConnection* connection,
++                                         GDBusMessage* message,
++                                         gboolean incoming,
++                                         gpointer user_data) {
++  auto self = static_cast<CoverPlugin*>(user_data);
++  if (!incoming ||
++      g_dbus_message_get_message_type(message) !=
++          G_DBUS_MESSAGE_TYPE_METHOD_CALL ||
++      g_strcmp0(g_dbus_message_get_path(message), self->path_.c_str()) != 0) {
++    return message;
++  }
++
++  GDBusMessage* reply;
++  if (g_strcmp0(g_dbus_message_get_member(message), kTriggerMethod) == 0) {
++    int32_t id = -1;
++    GVariant* body = g_dbus_message_get_body(message);
++    if (body && g_variant_is_of_type(body, G_VARIANT_TYPE("(i)"))) {
++      g_variant_get(body, "(i)", &id);
++    }
++    {
++      std::lock_guard<std::mutex> lock(self->mutex_);
++      self->pending_actions_.push_back(id);
++    }
++    reply = g_dbus_message_new_method_reply(message);
++  } else {
++    reply = g_dbus_message_new_method_error(
++        message, "org.freedesktop.DBus.Error.UnknownMethod", "Unknown method");
++  }
++  g_dbus_connection_send_message(connection, reply,
++                                 G_DBUS_SEND_MESSAGE_FLAGS_NONE, nullptr,
++                                 nullptr);
++  g_object_unref(reply);
++  // Handled here: returning null drops the message, which we own.
++  g_object_unref(message);
++  return nullptr;
++}
++
++}  // namespace flutter
+diff --git a/src/flutter/shell/platform/linux_embedded/plugins/cover_plugin.h b/src/flutter/shell/platform/linux_embedded/plugins/cover_plugin.h
+new file mode 100644
+index 0000000..c62b652
+--- /dev/null
++++ b/src/flutter/shell/platform/linux_embedded/plugins/cover_plugin.h
+@@ -0,0 +1,72 @@
++// Copyright 2026 Dave Nash. All rights reserved.
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#ifndef FLUTTER_SHELL_PLATFORM_LINUX_EMBEDDED_PLUGINS_COVER_PLUGIN_H_
++#define FLUTTER_SHELL_PLATFORM_LINUX_EMBEDDED_PLUGINS_COVER_PLUGIN_H_
++
++#include <gio/gio.h>
++#include <rapidjson/document.h>
++
++#include <memory>
++#include <mutex>
++#include <string>
++#include <vector>
++
++#include "flutter/shell/platform/common/client_wrapper/include/flutter/basic_message_channel.h"
++#include "flutter/shell/platform/common/client_wrapper/include/flutter/binary_messenger.h"
++#include "flutter/shell/platform/linux_embedded/window_binding_handler.h"
++
++namespace flutter {
++
++// The app's cover on Sailfish OS.
++//
++// On flutter-sfos/cover (JSON) the app is told whether it can have a cover,
++// whether Lipstick shows it and its size. It sends the pictures to show on
++// flutter-sfos/cover_frame; the first one creates the cover window, which
++// Lipstick then shows in the app's cover tile instead of the main window.
++//
++// The app can also give the cover buttons, which the home screen draws from
++// the _APP_COVER_ACTION window property. That names a D-Bus service of ours
++// and the method the home screen calls when a button is tapped; the taps are
++// passed on to the app.
++class CoverPlugin {
++ public:
++  CoverPlugin(BinaryMessenger* messenger, WindowBindingHandler* delegate);
++  ~CoverPlugin();
++
++  void SendCoverState();
++
++  // Sends the cover button taps received since the last call. Must be called
++  // on the platform thread.
++  void DispatchEvent();
++
++ private:
++  void HandleMessage(const rapidjson::Document& message);
++
++  // A picture: width and height (uint32, little-endian), then RGBA pixels.
++  void HandleFrame(const uint8_t* message, size_t size);
++
++  // Owns a D-Bus name for the home screen to call; returns false on failure.
++  bool RegisterActionService();
++
++  // Catches the home screen's trigger calls. Runs on GDBus' worker thread.
++  static GDBusMessage* FilterMessage(GDBusConnection* connection,
++                                     GDBusMessage* message,
++                                     gboolean incoming,
++                                     gpointer user_data);
++
++  BinaryMessenger* messenger_;
++  std::unique_ptr<BasicMessageChannel<rapidjson::Document>> channel_;
++  WindowBindingHandler* delegate_;
++  GDBusConnection* bus_ = nullptr;
++  guint filter_id_ = 0;
++  std::string service_;
++  std::string path_;
++  std::mutex mutex_;
++  std::vector<int32_t> pending_actions_;
++};
++
++}  // namespace flutter
++
++#endif  // FLUTTER_SHELL_PLATFORM_LINUX_EMBEDDED_PLUGINS_COVER_PLUGIN_H_
+diff --git a/src/flutter/shell/platform/linux_embedded/window/cover_window_wayland.cc b/src/flutter/shell/platform/linux_embedded/window/cover_window_wayland.cc
+new file mode 100644
+index 0000000..e104ab7
+--- /dev/null
++++ b/src/flutter/shell/platform/linux_embedded/window/cover_window_wayland.cc
+@@ -0,0 +1,240 @@
++// Copyright 2026 Dave Nash. All rights reserved.
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#include "flutter/shell/platform/linux_embedded/window/cover_window_wayland.h"
++
++#include <sys/mman.h>
++#include <unistd.h>
++
++#include <string>
++
++#include "flutter/shell/platform/linux_embedded/logger.h"
++#include "flutter/shell/platform/linux_embedded/window/qt_window_properties.h"
++
++namespace flutter {
++
++namespace {
++
++// Window ids for linking the cover to the main window. Lipstick matches them
++// only between windows of the same process, so small fixed numbers will do.
++constexpr uint64_t kMainWindowId = 1;
++constexpr uint64_t kCoverWindowId = 2;
++
++}  // namespace
++
++const wl_shell_surface_listener CoverWindowWayland::kShellSurfaceListener = {
++    .ping =
++        [](void* data, wl_shell_surface* wl_shell_surface, uint32_t serial) {
++          wl_shell_surface_pong(wl_shell_surface, serial);
++        },
++    .configure =
++        [](void* data,
++           wl_shell_surface* wl_shell_surface,
++           uint32_t edges,
++           int32_t width,
++           int32_t height) {
++          auto self = reinterpret_cast<CoverWindowWayland*>(data);
++          if (width <= 0 || height <= 0 ||
++              (width == self->width_ && height == self->height_)) {
++            return;
++          }
++          ELINUX_LOG(INFO) << "Cover size: " << width << "x" << height;
++          self->width_ = width;
++          self->height_ = height;
++          self->on_changed_();
++        },
++    .popup_done = [](void* data, wl_shell_surface* wl_shell_surface) {},
++};
++
++const qt_extended_surface_listener
++    CoverWindowWayland::kExtendedSurfaceListener = {
++        .onscreen_visibility =
++            [](void* data,
++               qt_extended_surface* qt_extended_surface,
++               int32_t visible) {
++              auto self = reinterpret_cast<CoverWindowWayland*>(data);
++              if ((visible != 0) == self->visible()) {
++                self->visibility_ = visible;
++                return;
++              }
++              self->visibility_ = visible;
++              self->on_changed_();
++            },
++        .set_generic_property =
++            [](void* data,
++               qt_extended_surface* qt_extended_surface,
++               const char* name,
++               wl_array* value) {},
++        .close = [](void* data, qt_extended_surface* qt_extended_surface) {},
++};
++
++const wl_buffer_listener CoverWindowWayland::kBufferListener = {
++    .release =
++        [](void* data, wl_buffer* wl_buffer) {
++          auto self = reinterpret_cast<CoverWindowWayland*>(data);
++          for (auto& buffer : self->buffers_) {
++            if (buffer.buffer == wl_buffer) {
++              buffer.busy = false;
++            }
++          }
++          if (!self->pending_.empty()) {
++            self->CommitPending();
++          }
++        },
++};
++
++CoverWindowWayland::CoverWindowWayland(
++    wl_compositor* compositor,
++    wl_shm* shm,
++    wl_shell* shell,
++    qt_surface_extension* surface_extension,
++    wl_surface* main_surface,
++    qt_extended_surface* main_extended_surface,
++    const char* app_id,
++    ChangedCallback on_changed)
++    : shm_(shm), on_changed_(std::move(on_changed)) {
++  surface_ = wl_compositor_create_surface(compositor);
++  if (!surface_) {
++    ELINUX_LOG(ERROR) << "Failed to create the cover surface.";
++    return;
++  }
++
++  // Set up like a Silica cover window: a wl_shell surface transient for the
++  // main window, with the app's class.
++  shell_surface_ = wl_shell_get_shell_surface(shell, surface_);
++  wl_shell_surface_add_listener(shell_surface_, &kShellSurfaceListener, this);
++  extended_surface_ =
++      qt_surface_extension_get_extended_surface(surface_extension, surface_);
++  qt_extended_surface_add_listener(extended_surface_, &kExtendedSurfaceListener,
++                                   this);
++  wl_shell_surface_set_title(shell_surface_, "_CoverWindow");
++  if (app_id != nullptr) {
++    wl_shell_surface_set_class(shell_surface_, app_id);
++  }
++  wl_shell_surface_set_transient(shell_surface_, main_surface, 0, 0, 0);
++  qt_extended_surface_set_content_orientation_mask(extended_surface_, 15);
++  qt_extended_surface_set_window_flags(extended_surface_, 0);
++
++  SetBoolWindowProperty(extended_surface_, "TRANSPARENT", false);
++  SetULongLongWindowProperty(extended_surface_, "WINID", kCoverWindowId);
++  SetStringWindowProperty(extended_surface_, "CATEGORY", "cover");
++
++  SetULongLongWindowProperty(main_extended_surface, "WINID", kMainWindowId);
++  SetStringWindowProperty(main_extended_surface, "SAILFISH_COVER_WINDOW",
++                          "__winref:" + std::to_string(kCoverWindowId));
++  SetBoolWindowProperty(main_extended_surface, "SAILFISH_HAVE_COVER", true);
++}
++
++CoverWindowWayland::~CoverWindowWayland() {
++  if (extended_surface_) {
++    qt_extended_surface_destroy(extended_surface_);
++  }
++  if (shell_surface_) {
++    wl_shell_surface_destroy(shell_surface_);
++  }
++  if (surface_) {
++    wl_surface_destroy(surface_);
++  }
++  DestroyBuffers();
++}
++
++void CoverWindowWayland::SetFrame(int32_t width,
++                                  int32_t height,
++                                  const uint8_t* rgba) {
++  pending_.assign(rgba, rgba + static_cast<size_t>(width) * height * 4);
++  pending_width_ = width;
++  pending_height_ = height;
++  CommitPending();
++}
++
++bool CoverWindowWayland::CreateBuffers(int32_t width, int32_t height) {
++  const int32_t stride = width * 4;
++  const size_t size = static_cast<size_t>(stride) * height;
++  for (auto& buffer : buffers_) {
++    const int fd = memfd_create("flutter-sfos-cover", MFD_CLOEXEC);
++    if (fd < 0) {
++      ELINUX_LOG(ERROR) << "Failed to create the cover buffer.";
++      return false;
++    }
++    if (ftruncate(fd, size) != 0) {
++      close(fd);
++      ELINUX_LOG(ERROR) << "Failed to size the cover buffer.";
++      return false;
++    }
++    void* data = mmap(nullptr, size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
++    if (data == MAP_FAILED) {
++      close(fd);
++      ELINUX_LOG(ERROR) << "Failed to map the cover buffer.";
++      return false;
++    }
++    wl_shm_pool* pool = wl_shm_create_pool(shm_, fd, size);
++    buffer.buffer = wl_shm_pool_create_buffer(pool, 0, width, height, stride,
++                                              WL_SHM_FORMAT_ARGB8888);
++    wl_shm_pool_destroy(pool);
++    close(fd);
++    buffer.data = data;
++    buffer.size = size;
++    buffer.busy = false;
++    wl_buffer_add_listener(buffer.buffer, &kBufferListener, this);
++  }
++  buffer_width_ = width;
++  buffer_height_ = height;
++  return true;
++}
++
++void CoverWindowWayland::DestroyBuffers() {
++  for (auto& buffer : buffers_) {
++    if (buffer.buffer) {
++      wl_buffer_destroy(buffer.buffer);
++    }
++    if (buffer.data) {
++      munmap(buffer.data, buffer.size);
++    }
++    buffer = Buffer();
++  }
++  buffer_width_ = 0;
++  buffer_height_ = 0;
++}
++
++void CoverWindowWayland::CommitPending() {
++  if (pending_width_ != buffer_width_ || pending_height_ != buffer_height_) {
++    DestroyBuffers();
++    if (!CreateBuffers(pending_width_, pending_height_)) {
++      DestroyBuffers();
++      pending_.clear();
++      return;
++    }
++  }
++  Buffer* buffer = nullptr;
++  for (auto& candidate : buffers_) {
++    if (!candidate.busy) {
++      buffer = &candidate;
++      break;
++    }
++  }
++  if (!buffer) {
++    // Shown once a buffer is released.
++    return;
++  }
++
++  // RGBA bytes to WL_SHM_FORMAT_ARGB8888, which is little-endian (B, G, R, A
++  // in memory). Both are premultiplied.
++  const uint8_t* src = pending_.data();
++  auto* dst = static_cast<uint8_t*>(buffer->data);
++  const size_t pixels = static_cast<size_t>(pending_width_) * pending_height_;
++  for (size_t i = 0; i < pixels; i++, src += 4, dst += 4) {
++    dst[0] = src[2];
++    dst[1] = src[1];
++    dst[2] = src[0];
++    dst[3] = src[3];
++  }
++  pending_.clear();
++
++  wl_surface_attach(surface_, buffer->buffer, 0, 0);
++  wl_surface_damage(surface_, 0, 0, buffer_width_, buffer_height_);
++  wl_surface_commit(surface_);
++  buffer->busy = true;
++}
++
++}  // namespace flutter
+diff --git a/src/flutter/shell/platform/linux_embedded/window/cover_window_wayland.h b/src/flutter/shell/platform/linux_embedded/window/cover_window_wayland.h
+new file mode 100644
+index 0000000..d0203a3
+--- /dev/null
++++ b/src/flutter/shell/platform/linux_embedded/window/cover_window_wayland.h
+@@ -0,0 +1,91 @@
++// Copyright 2026 Dave Nash. All rights reserved.
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#ifndef FLUTTER_SHELL_PLATFORM_LINUX_EMBEDDED_WINDOW_COVER_WINDOW_WAYLAND_H_
++#define FLUTTER_SHELL_PLATFORM_LINUX_EMBEDDED_WINDOW_COVER_WINDOW_WAYLAND_H_
++
++#include <wayland-client.h>
++
++#include <cstddef>
++#include <cstdint>
++#include <functional>
++#include <vector>
++
++#include "wayland/protocols/surface-extension-client-protocol.h"
++
++namespace flutter {
++
++// A Sailfish app cover: a second wl_shell window that Lipstick shows in the
++// app's cover tile on the home screen, instead of a shrunken copy of the main
++// window. It is linked to the main window through Qt surface extension window
++// properties, as Silica apps do. It shows pictures the app draws.
++class CoverWindowWayland {
++ public:
++  // The size Lipstick shows covers at on the Jolla Phone 2026, used until
++  // Lipstick confirms the size with a configure.
++  static constexpr int32_t kDefaultWidth = 446;
++  static constexpr int32_t kDefaultHeight = 714;
++
++  // Called when Lipstick shows or hides the cover, or changes its size.
++  using ChangedCallback = std::function<void()>;
++
++  CoverWindowWayland(wl_compositor* compositor,
++                     wl_shm* shm,
++                     wl_shell* shell,
++                     qt_surface_extension* surface_extension,
++                     wl_surface* main_surface,
++                     qt_extended_surface* main_extended_surface,
++                     const char* app_id,
++                     ChangedCallback on_changed);
++  ~CoverWindowWayland();
++
++  bool IsValid() const { return surface_ != nullptr; }
++
++  bool visible() const { return visibility_ != 0; }
++  int32_t width() const { return width_; }
++  int32_t height() const { return height_; }
++
++  // Shows a picture of |width| x |height| pixels, RGBA with premultiplied
++  // alpha. If both buffers are still in use, the latest picture is shown as
++  // soon as one is released.
++  void SetFrame(int32_t width, int32_t height, const uint8_t* rgba);
++
++ private:
++  struct Buffer {
++    wl_buffer* buffer = nullptr;
++    void* data = nullptr;
++    size_t size = 0;
++    bool busy = false;
++  };
++
++  static const wl_shell_surface_listener kShellSurfaceListener;
++  static const qt_extended_surface_listener kExtendedSurfaceListener;
++  static const wl_buffer_listener kBufferListener;
++
++  bool CreateBuffers(int32_t width, int32_t height);
++  void DestroyBuffers();
++
++  // Copies the pending picture into a free buffer and commits it.
++  void CommitPending();
++
++  wl_shm* shm_;
++  ChangedCallback on_changed_;
++  wl_surface* surface_ = nullptr;
++  wl_shell_surface* shell_surface_ = nullptr;
++  qt_extended_surface* extended_surface_ = nullptr;
++  Buffer buffers_[2];
++  int32_t buffer_width_ = 0;
++  int32_t buffer_height_ = 0;
++  int32_t width_ = kDefaultWidth;
++  int32_t height_ = kDefaultHeight;
++  int32_t visibility_ = 0;
++  // The latest picture not yet shown, as RGBA.
++  std::vector<uint8_t> pending_;
++  int32_t pending_width_ = 0;
++  int32_t pending_height_ = 0;
++};
++
++}  // namespace flutter
++
++#endif  // FLUTTER_SHELL_PLATFORM_LINUX_EMBEDDED_WINDOW_COVER_WINDOW_WAYLAND_H_
+diff --git a/src/flutter/shell/platform/linux_embedded/window/elinux_window_wayland.cc b/src/flutter/shell/platform/linux_embedded/window/elinux_window_wayland.cc
+index 7a96d1b..1253d22 100644
+--- a/src/flutter/shell/platform/linux_embedded/window/elinux_window_wayland.cc
++++ b/src/flutter/shell/platform/linux_embedded/window/elinux_window_wayland.cc
+@@ -22,6 +22,7 @@
+ 
+ #include "flutter/shell/platform/linux_embedded/logger.h"
+ #include "flutter/shell/platform/linux_embedded/surface/context_egl.h"
++#include "flutter/shell/platform/linux_embedded/window/qt_window_properties.h"
+ 
+ namespace flutter {
+ 
+@@ -291,13 +292,16 @@ const qt_extended_surface_listener
+                   << "qt_extended_surface.onscreen_visibility: " << visible;
+               auto self = reinterpret_cast<ELinuxWindowWayland*>(data);
+               // Undocumented; observed on SFOS 5.2: 5 in the foreground, 3
+-              // while shown as an app cover, 0 when hidden. Bit 2 is taken
+-              // to mean "cover".
+-              const bool cover = (visible & 2) != 0;
+-              if (cover != self->shown_as_cover_) {
+-                self->shown_as_cover_ = cover;
+-                self->MaybeApplyOutputTransform();
++              // while shown as an app cover, 0 when hidden (also while
++              // minimised, when the home screen is off-screen or dimmed).
++              // Bit 2 is taken to mean "cover". Hidden keeps the current
++              // state, so the window doesn't turn while nobody can see it
++              // and then show up turned in its tile.
++              if (visible == 0) {
++                return;
+               }
++              const bool cover = (visible & 2) != 0;
++              self->SetShownAsCover(cover);
+             },
+         .set_generic_property =
+             [](void* data,
+@@ -1678,6 +1682,10 @@ bool ELinuxWindowWayland::CreateRenderSurface(int32_t width_px,
+                                      &kQtExtendedSurfaceListener, this);
+     UpdateContentOrientationMask();
+     qt_extended_surface_set_window_flags(qt_extended_surface_, 0);
++    if (!cover_actions_.empty()) {
++      SetStringWindowProperty(qt_extended_surface_, "_APP_COVER_ACTION",
++                              cover_actions_);
++    }
+   } else {
+     xdg_surface_ =
+         xdg_wm_base_get_xdg_surface(xdg_wm_base_, native_window_->Surface());
+@@ -1771,6 +1779,9 @@ void ELinuxWindowWayland::CreateDecoration(int32_t width_dip,
+ }
+ 
+ void ELinuxWindowWayland::DestroyRenderSurface() {
++  // The cover is transient for the main surface, so it goes first.
++  cover_window_ = nullptr;
++
+   // destroy the main surface before destroying the client window on Wayland.
+   if (window_decorations_) {
+     window_decorations_ = nullptr;
+@@ -2339,10 +2350,19 @@ bool ELinuxWindowWayland::IsCoverConfigure(int32_t width,
+   return conf_long * 5 < disp_long * 4;
+ }
+ 
++void ELinuxWindowWayland::SetShownAsCover(bool shown_as_cover) {
++  if (shown_as_cover == shown_as_cover_) {
++    return;
++  }
++  shown_as_cover_ = shown_as_cover;
++  MaybeApplyOutputTransform();
++}
++
+ void ELinuxWindowWayland::MaybeApplyOutputTransform() {
+-  // Without a cover window of its own, Lipstick scales this window into the
+-  // portrait app cover, so draw portrait while shown as a cover.
+-  int32_t target = shown_as_cover_ ? WL_OUTPUT_TRANSFORM_NORMAL : transform_;
++  // While shown as the app's cover, keep the current orientation: Lipstick
++  // shows the window upright in the cover tile as it is, and would animate
++  // a turn there.
++  int32_t target = shown_as_cover_ ? applied_transform_ : transform_;
+   // Respect the app's preferred orientations: stay put when the new one isn't
+   // allowed, or move to the most preferred one if the current one isn't.
+   if (!IsTransformAllowed(target)) {
+@@ -2497,6 +2517,55 @@ DisplayCutouts ELinuxWindowWayland::GetDisplayCutouts() const {
+   return cutouts;
+ }
+ 
++CoverState ELinuxWindowWayland::GetCoverState() const {
++  CoverState state;
++  // Cover windows need the Qt surface extension, which only the wl_shell
++  // path uses.
++  state.available = use_wl_shell_ && wl_shm_ && qt_extended_surface_;
++  if (!state.available) {
++    return state;
++  }
++  if (cover_window_) {
++    state.visible = cover_window_->visible();
++    state.width = cover_window_->width();
++    state.height = cover_window_->height();
++  } else {
++    state.width = CoverWindowWayland::kDefaultWidth;
++    state.height = CoverWindowWayland::kDefaultHeight;
++  }
++  return state;
++}
++
++void ELinuxWindowWayland::SetCoverFrame(int32_t width,
++                                        int32_t height,
++                                        const uint8_t* rgba) {
++  if (!cover_window_) {
++    if (!GetCoverState().available) {
++      return;
++    }
++    cover_window_ = std::make_unique<CoverWindowWayland>(
++        wl_compositor_, wl_shm_, wl_shell_, qt_surface_extension_,
++        native_window_->Surface(), qt_extended_surface_,
++        view_properties_.app_id, [this]() {
++          if (binding_handler_delegate_) {
++            binding_handler_delegate_->OnCoverChanged();
++          }
++        });
++    if (!cover_window_->IsValid()) {
++      cover_window_ = nullptr;
++      return;
++    }
++  }
++  cover_window_->SetFrame(width, height, rgba);
++}
++
++void ELinuxWindowWayland::SetCoverActions(const std::string& actions) {
++  cover_actions_ = actions;
++  if (qt_extended_surface_) {
++    SetStringWindowProperty(qt_extended_surface_, "_APP_COVER_ACTION", actions);
++  }
++}
++
+ bool ELinuxWindowWayland::IsTransformAllowed(int32_t transform) const {
+   return preferred_transforms_.empty() ||
+          std::find(preferred_transforms_.begin(), preferred_transforms_.end(),
+diff --git a/src/flutter/shell/platform/linux_embedded/window/elinux_window_wayland.h b/src/flutter/shell/platform/linux_embedded/window/elinux_window_wayland.h
+index aa6ec6d..adb8f24 100644
+--- a/src/flutter/shell/platform/linux_embedded/window/elinux_window_wayland.h
++++ b/src/flutter/shell/platform/linux_embedded/window/elinux_window_wayland.h
+@@ -13,6 +13,7 @@
+ #include <unordered_set>
+ 
+ #include "flutter/shell/platform/linux_embedded/surface/surface_gl.h"
++#include "flutter/shell/platform/linux_embedded/window/cover_window_wayland.h"
+ #include "flutter/shell/platform/linux_embedded/window/elinux_window.h"
+ #include "flutter/shell/platform/linux_embedded/window/native_window_wayland.h"
+ #include "flutter/shell/platform/linux_embedded/window/renderer/window_decorations_wayland.h"
+@@ -99,6 +100,17 @@ class ELinuxWindowWayland : public ELinuxWindow, public WindowBindingHandler {
+   // |FlutterWindowBindingHandler|
+   DisplayCutouts GetDisplayCutouts() const override;
+ 
++  // |FlutterWindowBindingHandler|
++  void SetCoverActions(const std::string& actions) override;
++
++  // |FlutterWindowBindingHandler|
++  CoverState GetCoverState() const override;
++
++  // |FlutterWindowBindingHandler|
++  void SetCoverFrame(int32_t width,
++                     int32_t height,
++                     const uint8_t* rgba) override;
++
+   // |FlutterWindowBindingHandler|
+   void UpdateVirtualKeyboardArea(int32_t x,
+                                  int32_t y,
+@@ -139,6 +151,9 @@ class ELinuxWindowWayland : public ELinuxWindow, public WindowBindingHandler {
+   void MaybeUpdateDevicePixelRatio();
+ 
+   // Follows the wl_output transform that Lipstick sends on rotation.
++  // Starts or stops drawing as the app's cover.
++  void SetShownAsCover(bool shown_as_cover);
++
+   void MaybeApplyOutputTransform();
+   bool FollowsOutputTransform() const;
+   bool IsTransformAllowed(int32_t transform) const;
+@@ -276,6 +291,11 @@ class ELinuxWindowWayland : public ELinuxWindow, public WindowBindingHandler {
+   std::vector<int32_t> preferred_transforms_;
+   // Display cut-outs from Silica's settings, in native panel pixels.
+   std::vector<PhysicalRect> display_cutouts_;
++
++  // _APP_COVER_ACTION value; kept until the extended surface exists.
++  std::string cover_actions_;
++  // The app's cover window, once the app has drawn a cover.
++  std::unique_ptr<CoverWindowWayland> cover_window_;
+ };
+ 
+ }  // namespace flutter
+diff --git a/src/flutter/shell/platform/linux_embedded/window/qt_window_properties.cc b/src/flutter/shell/platform/linux_embedded/window/qt_window_properties.cc
+new file mode 100644
+index 0000000..f66a608
+--- /dev/null
++++ b/src/flutter/shell/platform/linux_embedded/window/qt_window_properties.cc
+@@ -0,0 +1,75 @@
++// Copyright 2026 Dave Nash. All rights reserved.
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#include "flutter/shell/platform/linux_embedded/window/qt_window_properties.h"
++
++#include <cstring>
++#include <vector>
++
++namespace flutter {
++
++namespace {
++
++// QDataStream (Qt 5) writes a QVariant as its big-endian type id, a null flag
++// byte, then the value.
++constexpr uint32_t kQMetaTypeBool = 1;
++constexpr uint32_t kQMetaTypeULongLong = 5;
++constexpr uint32_t kQMetaTypeQString = 10;
++
++void AppendU32(std::vector<uint8_t>& out, uint32_t value) {
++  for (int shift = 24; shift >= 0; shift -= 8) {
++    out.push_back(static_cast<uint8_t>(value >> shift));
++  }
++}
++
++std::vector<uint8_t> VariantHeader(uint32_t type) {
++  std::vector<uint8_t> out;
++  AppendU32(out, type);
++  out.push_back(0);  // Not null.
++  return out;
++}
++
++void Send(qt_extended_surface* surface,
++          const char* name,
++          const std::vector<uint8_t>& value) {
++  wl_array array;
++  wl_array_init(&array);
++  std::memcpy(wl_array_add(&array, value.size()), value.data(), value.size());
++  qt_extended_surface_update_generic_property(surface, name, &array);
++  wl_array_release(&array);
++}
++
++}  // namespace
++
++void SetBoolWindowProperty(qt_extended_surface* surface,
++                           const char* name,
++                           bool value) {
++  auto out = VariantHeader(kQMetaTypeBool);
++  out.push_back(value ? 1 : 0);
++  Send(surface, name, out);
++}
++
++void SetULongLongWindowProperty(qt_extended_surface* surface,
++                                const char* name,
++                                uint64_t value) {
++  auto out = VariantHeader(kQMetaTypeULongLong);
++  AppendU32(out, static_cast<uint32_t>(value >> 32));
++  AppendU32(out, static_cast<uint32_t>(value));
++  Send(surface, name, out);
++}
++
++void SetStringWindowProperty(qt_extended_surface* surface,
++                             const char* name,
++                             const std::string& value) {
++  // A QString is its UTF-16 byte length, then UTF-16BE; ASCII maps directly.
++  auto out = VariantHeader(kQMetaTypeQString);
++  AppendU32(out, static_cast<uint32_t>(value.size() * 2));
++  for (char c : value) {
++    out.push_back(0);
++    out.push_back(static_cast<uint8_t>(c));
++  }
++  Send(surface, name, out);
++}
++
++}  // namespace flutter
+diff --git a/src/flutter/shell/platform/linux_embedded/window/qt_window_properties.h b/src/flutter/shell/platform/linux_embedded/window/qt_window_properties.h
+new file mode 100644
+index 0000000..252cfd9
+--- /dev/null
++++ b/src/flutter/shell/platform/linux_embedded/window/qt_window_properties.h
+@@ -0,0 +1,34 @@
++// Copyright 2026 Dave Nash. All rights reserved.
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#ifndef FLUTTER_SHELL_PLATFORM_LINUX_EMBEDDED_WINDOW_QT_WINDOW_PROPERTIES_H_
++#define FLUTTER_SHELL_PLATFORM_LINUX_EMBEDDED_WINDOW_QT_WINDOW_PROPERTIES_H_
++
++#include <cstdint>
++#include <string>
++
++#include "wayland/protocols/surface-extension-client-protocol.h"
++
++namespace flutter {
++
++// Window properties of the Qt surface extension, which Lipstick reads (e.g.
++// CATEGORY, WINID, _APP_COVER_ACTION). The values are QVariants serialised
++// by QDataStream (Qt 5).
++
++void SetBoolWindowProperty(qt_extended_surface* surface,
++                           const char* name,
++                           bool value);
++
++void SetULongLongWindowProperty(qt_extended_surface* surface,
++                                const char* name,
++                                uint64_t value);
++
++// |value| must be ASCII.
++void SetStringWindowProperty(qt_extended_surface* surface,
++                             const char* name,
++                             const std::string& value);
++
++}  // namespace flutter
++
++#endif  // FLUTTER_SHELL_PLATFORM_LINUX_EMBEDDED_WINDOW_QT_WINDOW_PROPERTIES_H_
+diff --git a/src/flutter/shell/platform/linux_embedded/window_binding_handler.h b/src/flutter/shell/platform/linux_embedded/window_binding_handler.h
+index ad94d60..6910538 100644
+--- a/src/flutter/shell/platform/linux_embedded/window_binding_handler.h
++++ b/src/flutter/shell/platform/linux_embedded/window_binding_handler.h
+@@ -38,6 +38,15 @@ struct PhysicalRect {
+   int32_t height = 0;
+ };
+ 
++// The app's cover on Sailfish OS: whether the window can have one, whether
++// Lipstick is showing it, and its size in physical pixels.
++struct CoverState {
++  bool available = false;
++  bool visible = false;
++  int32_t width = 0;
++  int32_t height = 0;
++};
++
+ // Display cut-outs (e.g. a camera notch) in view coordinates for the current
+ // content orientation, and the padding that keeps content clear of them.
+ struct DisplayCutouts {
+@@ -127,6 +136,20 @@ class WindowBindingHandler {
+   // Returns the display cut-outs the view is drawn under, if any.
+   virtual DisplayCutouts GetDisplayCutouts() const { return {}; }
+ 
++  // Sets the buttons Sailfish OS shows on the app's cover, as the value of
++  // the _APP_COVER_ACTION window property (empty for none).
++  virtual void SetCoverActions(const std::string& actions) {}
++
++  // Returns whether the app can have a cover window, whether it's shown and
++  // its size.
++  virtual CoverState GetCoverState() const { return {}; }
++
++  // Shows a picture in the app's cover window, creating the window the first
++  // time: |width| x |height| pixels, RGBA with premultiplied alpha.
++  virtual void SetCoverFrame(int32_t width,
++                             int32_t height,
++                             const uint8_t* rgba) {}
++
+   // Returns the clipboard data.
+   virtual std::string GetClipboardData() = 0;
+ 
+diff --git a/src/flutter/shell/platform/linux_embedded/window_binding_handler_delegate.h b/src/flutter/shell/platform/linux_embedded/window_binding_handler_delegate.h
+index 5002355..4f3011c 100644
+--- a/src/flutter/shell/platform/linux_embedded/window_binding_handler_delegate.h
++++ b/src/flutter/shell/platform/linux_embedded/window_binding_handler_delegate.h
+@@ -22,6 +22,10 @@ class WindowBindingHandlerDelegate {
+   // Notifies delegate that the content orientation has changed.
+   virtual void OnContentOrientationChanged() {}
+ 
++  // Notifies delegate that the app's cover window was shown or hidden, or
++  // changed size (Sailfish OS).
++  virtual void OnCoverChanged() {}
++
+   // Notifies delegate that backing window mouse has moved. Typically called by
+   // currently configured WindowBindingHandler
+   // @param[in] x_px The x coordinate of the pointer event in physical pixels.
