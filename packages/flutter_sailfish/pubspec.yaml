@@ -1,0 +1,17 @@
+name: flutter_sailfish
+description: Sailfish OS features for Flutter apps on the flutter-sailfish runtime, such as app covers and display cut-outs.
+version: 0.1.0
+# Not published yet.
+publish_to: none
+
+environment:
+  sdk: ^3.11.5
+  flutter: ">=3.41.0"
+
+dependencies:
+  flutter:
+    sdk: flutter
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
