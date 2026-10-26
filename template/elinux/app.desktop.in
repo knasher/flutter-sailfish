@@ -1,4 +1,4 @@
-# Copy into elinux/ and adjust Name / Exec.
+# Copy into elinux/ and adjust Name / Exec / X-Sailjail.
 
 [Desktop Entry]
 Type=Application
@@ -8,5 +8,11 @@ Icon=icon-m-developer-mode
 Exec=my-flutter-app
 X-Nemo-Application-Type=generic
 
+# Sailjail sandbox. List the permissions the app needs, e.g.
+# Permissions=Internet;Pictures (see sailfishos/sailjail-permissions).
+# The app can write to ~/.local/share, ~/.config and ~/.cache under
+# <OrganizationName>/<ApplicationName>.
 [X-Sailjail]
-Sandboxing=Disabled
+Permissions=
+OrganizationName=org.example
+ApplicationName=MyFlutterApp

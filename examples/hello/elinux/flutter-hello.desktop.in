@@ -7,4 +7,6 @@ Exec=flutter-hello
 X-Nemo-Application-Type=generic
 
 [X-Sailjail]
-Sandboxing=Disabled
+Permissions=
+OrganizationName=io.github.knasher
+ApplicationName=hello

@@ -11,11 +11,18 @@
 
 #include "command_options.h"
 
+// Sailfish OS: the app RPM installs this binary as /usr/bin/<name> and the
+// bundle in /usr/share/<name>, as Sailjail expects, so the launch line needs
+// no options. runner/CMakeLists.txt sets the name.
+#ifndef FLUTTER_SFOS_BINARY_NAME
+#define FLUTTER_SFOS_BINARY_NAME "flutter"
+#endif
+
 class FlutterEmbedderOptions {
  public:
   FlutterEmbedderOptions() {
     options_.AddString("bundle", "b", "Path to Flutter project bundle",
-                       "./bundle", true);
+                       "/usr/share/" FLUTTER_SFOS_BINARY_NAME, false);
     options_.AddWithoutValue("no-cursor", "n", "No mouse cursor/pointer",
                              false);
     options_.AddInt("rotation", "r",
@@ -43,15 +50,16 @@ class FlutterEmbedderOptions {
     options_.AddInt("width", "w", "Window width", 1280, false);
     options_.AddInt("height", "h", "Window height", 720, false);
 #else  // FLUTTER_TARGET_BACKEND_WAYLAND
-    options_.AddString("title", "t", "Window title", "Flutter", false);
-    options_.AddString("app-id", "a", "XDG App ID", "dev.flutter.elinux",
+    options_.AddString("title", "t", "Window title", FLUTTER_SFOS_BINARY_NAME,
+                       false);
+    options_.AddString("app-id", "a", "XDG App ID", FLUTTER_SFOS_BINARY_NAME,
                        false);
     options_.AddWithoutValue("onscreen-keyboard", "k",
-                             "Enable on-screen keyboard", false);
+                             "Enable on-screen keyboard (always on)", false);
     options_.AddWithoutValue("window-decoration", "d",
                              "Enable window decorations", false);
-    options_.AddWithoutValue("fullscreen", "f", "Always full-screen display",
-                             false);
+    options_.AddWithoutValue("fullscreen", "f",
+                             "Always full-screen display (always on)", false);
     options_.AddInt("width", "w", "Window width", 1280, false);
     options_.AddInt("height", "h", "Window height", 720, false);
 #endif
@@ -119,12 +127,10 @@ class FlutterEmbedderOptions {
 #else  // FLUTTER_TARGET_BACKEND_WAYLAND
     window_title_ = options_.GetValue<std::string>("title");
     window_app_id_ = options_.GetValue<std::string>("app-id");
-    use_onscreen_keyboard_ = options_.Exist("onscreen-keyboard");
+    // Sailfish OS apps are always full screen and use the on-screen keyboard.
+    use_onscreen_keyboard_ = true;
     use_window_decoration_ = options_.Exist("window-decoration");
-    window_view_mode_ =
-        options_.Exist("fullscreen")
-            ? flutter::FlutterViewController::ViewMode::kFullscreen
-            : flutter::FlutterViewController::ViewMode::kNormal;
+    window_view_mode_ = flutter::FlutterViewController::ViewMode::kFullscreen;
     window_width_ = options_.GetValue<int>("width");
     window_height_ = options_.GetValue<int>("height");
 #endif

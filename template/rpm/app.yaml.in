@@ -29,7 +29,7 @@ ExtraInstall: |
   cp -a build/sfos/bundle/. %{buildroot}%{_datadir}/my-flutter-app/
   rm -f %{buildroot}%{_datadir}/my-flutter-app/lib/libflutter_engine.so \
     %{buildroot}%{_datadir}/my-flutter-app/lib/libflutter_elinux_*.so
-  install -m 755 elinux/my-flutter-app.sh %{buildroot}%{_bindir}/my-flutter-app
+  mv %{buildroot}%{_datadir}/my-flutter-app/my-flutter-app %{buildroot}%{_bindir}/my-flutter-app
   install -m 644 elinux/my-flutter-app.desktop %{buildroot}%{_datadir}/applications/my-flutter-app.desktop
 Files:
 - '%{_bindir}/my-flutter-app'

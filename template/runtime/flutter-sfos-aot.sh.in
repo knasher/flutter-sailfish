@@ -16,6 +16,8 @@ LIB=/usr/lib64/flutter-sfos/$VER
 if [ ! -f "$LIB/libflutter_engine.so" ]; then
 	LIB=/usr/lib/flutter-sfos/$VER
 fi
+# The app's runner/CMakeLists.txt puts this in the binary's RPATH.
+export FLUTTER_SFOS_LIBDIR=$LIB
 
 test -x "$SDK/bin/flutter"
 test -x "$SNAP"

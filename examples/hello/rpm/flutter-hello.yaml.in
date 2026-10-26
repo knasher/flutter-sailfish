@@ -1,7 +1,7 @@
 Name: flutter-hello
 Summary: Flutter counter sample for Sailfish OS
 Version: 1.0.0
-Release: 1
+Release: 2
 Group: Applications/System
 License: BSD-3-Clause
 Sources:
@@ -29,7 +29,7 @@ ExtraInstall: |
   cp -a build/sfos/bundle/. %{buildroot}%{_datadir}/flutter-hello/
   rm -f %{buildroot}%{_datadir}/flutter-hello/lib/libflutter_engine.so \
     %{buildroot}%{_datadir}/flutter-hello/lib/libflutter_elinux_*.so
-  install -m 755 elinux/flutter-hello.sh %{buildroot}%{_bindir}/flutter-hello
+  mv %{buildroot}%{_datadir}/flutter-hello/flutter-hello %{buildroot}%{_bindir}/flutter-hello
   install -m 644 elinux/flutter-hello.desktop %{buildroot}%{_datadir}/applications/flutter-hello.desktop
 Files:
 - '%{_bindir}/flutter-hello'

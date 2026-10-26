@@ -6,10 +6,11 @@ Copy the app-side files into an existing Flutter project:
 cp -a template/elinux your_app/elinux
 cp -a template/.sfosbuild your_app/.sfosbuild
 cp -a template/rpm your_app/rpm
-# rename elinux/launcher.sh.in, elinux/app.desktop.in, rpm/app.yaml.in
-# set BINARY_NAME in elinux/CMakeLists.txt
+# rename elinux/app.desktop.in and rpm/app.yaml.in to your app's name
+# set BINARY_NAME in elinux/CMakeLists.txt (the same name)
 # set FLUTTER_VERSION in elinux/flutter-sfos.env
-# ExtraInstall install= lines must match the renamed launcher/desktop
+# set Name, Exec and the [X-Sailjail] section in the desktop file
+# the yaml's ExtraInstall lines must use the same name
 ```
 
 ```bash
@@ -160,8 +161,9 @@ void main() {
   `-pause`, `-play`, …; the package README lists them all), so leave room
   there. Taps call `onPressed`, and don't open the app.
 
-Needs a `flutter-sfos` runtime with patch 0010. Not tried yet in apps run
-under Sailjail; the cover buttons need the app to own a D-Bus name.
+Needs a `flutter-sfos` runtime with patch 0010. Works in sandboxed apps:
+Sailjail lets every app own the cover buttons' D-Bus name
+(`org.sailfishos.coveraction.*`).
 
 How it works: the package draws the cover off-screen and sends the picture on
 `flutter-sfos/cover_frame`; the first one makes the runtime create a cover
@@ -186,3 +188,39 @@ When hidden or paused, the app stops drawing frames and animations stop, which
 saves battery; timers and other Dart code keep running. A cover set with
 `SailfishCover` keeps updating while the app is paused. Needs a `flutter-sfos`
 runtime with patch 0011.
+
+## Sandboxing (Sailjail)
+
+Apps run in Sailjail's sandbox, like native ones. The `[X-Sailjail]` section
+of the desktop file says what the app may use:
+
+```ini
+[X-Sailjail]
+Permissions=Internet;Pictures
+OrganizationName=org.example
+ApplicationName=MyFlutterApp
+```
+
+- `Permissions` lists what the app needs beyond the basics (display,
+  keyboard, covers, dconf), e.g. `Internet`, `Audio`, `Pictures`, `Location`.
+  The list is in [sailjail-permissions](https://github.com/sailfishos/sailjail-permissions#permissions).
+  Leave it empty if the app needs none.
+- The app can only write to `~/.local/share`, `~/.config` and `~/.cache`
+  under `<OrganizationName>/<ApplicationName>`. Other files in the home
+  folder aren't visible.
+- There's no network without `Internet`, and the app can't run other
+  programs: the sandbox's `/usr/bin` holds only the app.
+
+The template already has the layout Sailjail expects: the app binary is
+`/usr/bin/<name>`, its desktop file `/usr/share/applications/<name>.desktop`
+and its files `/usr/share/<name>`. The binary is the Flutter runner itself,
+not a script, because Sailjail only starts ELF binaries. It finds its bundle
+in `/usr/share/<name>` and the runtime's libraries through its RPATH;
+`LD_LIBRARY_PATH` doesn't reach sandboxed apps. Needs a `flutter-sfos`
+runtime with patch 0012 (otherwise cut-outs and the pixel ratio are wrong in
+the sandbox) and its `flutter-sfos-aot` (which sets the RPATH).
+
+Started from a shell, `/usr/bin/<name>` runs outside the sandbox. To run it
+sandboxed, with Sailjail's logs, see its
+[debugging guide](https://github.com/sailfishos/sailjail/blob/master/APPDEBUG.md):
+`sailjail --trace=<dir> -p <name>.desktop /usr/bin/<name>`.
