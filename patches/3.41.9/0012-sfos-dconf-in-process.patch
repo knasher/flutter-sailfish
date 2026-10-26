@@ -1,0 +1,126 @@
+Read dconf in-process instead of running the dconf tool (needs 0003, 0009).
+
+0003 (device pixel ratio) and 0009 (display cut-outs) read Lipstick's and
+Silica's settings with popen("dconf read ..."). Sandboxed apps (Sailjail)
+have no shell or dconf tool, since /usr/bin in the sandbox holds only the
+app's own binary. The reads then failed silently: no cut-outs, and the pixel
+ratio fell back to the wl_output size (2.5 instead of 2.25 on the Jolla
+Phone 2026).
+
+They now use libdconf (dconf_client_read) and g_variant_print, which gives
+the same text the dconf tool prints, so the parsing is unchanged. Sailjail's
+base permission already allows the dconf files. Needs dconf-devel to build;
+libdconf.so.1 is on every Sailfish OS device.
+
+diff --git a/cmake/build.cmake b/cmake/build.cmake
+index 9905a1d..626dcac 100644
+--- a/cmake/build.cmake
++++ b/cmake/build.cmake
+@@ -246,6 +246,7 @@ target_include_directories(${TARGET}
+     ${LIBWESTON_INCLUDE_DIRS}
+     ${GLIB_INCLUDE_DIRS}
+     ${GIO_INCLUDE_DIRS}
++    ${DCONF_INCLUDE_DIRS}
+     ${MALIIT_GLIB_INCLUDE_DIRS}
+     ## User libraries
+     ${USER_APP_INCLUDE_DIRS}
+@@ -268,6 +269,7 @@ target_link_libraries(${TARGET}
+     ${LIBWESTON_LIBRARIES}
+     ${GLIB_LIBRARIES}
+     ${GIO_LIBRARIES}
++    ${DCONF_LIBRARIES}
+     ${MALIIT_GLIB_LIBRARIES}
+     ${FLUTTER_EMBEDDER_LIB}
+     ## User libraries
+diff --git a/cmake/package.cmake b/cmake/package.cmake
+index 00ece31..d22e0aa 100644
+--- a/cmake/package.cmake
++++ b/cmake/package.cmake
+@@ -45,4 +45,5 @@ pkg_check_modules(GLES REQUIRED glesv2)
+ 
+ pkg_check_modules(GLIB REQUIRED glib-2.0)
+ pkg_check_modules(GIO REQUIRED gio-2.0)
++pkg_check_modules(DCONF REQUIRED dconf)
+ pkg_check_modules(MALIIT_GLIB REQUIRED maliit-glib)
+diff --git a/src/flutter/shell/platform/linux_embedded/window/elinux_window_wayland.cc b/src/flutter/shell/platform/linux_embedded/window/elinux_window_wayland.cc
+index 65eeb77..1ccf3a0 100644
+--- a/src/flutter/shell/platform/linux_embedded/window/elinux_window_wayland.cc
++++ b/src/flutter/shell/platform/linux_embedded/window/elinux_window_wayland.cc
+@@ -10,6 +10,8 @@
+ #include <unistd.h>
+ #include <xkbcommon/xkbcommon-keysyms.h>
+ 
++#include <dconf.h>
++
+ #include <algorithm>
+ #include <cassert>
+ #include <cmath>
+@@ -61,29 +63,31 @@ double SnapDevicePixelRatio(double dpi) {
+   return dpr;
+ }
+ 
++// Reads a dconf key as the dconf tool prints it, or "" if it isn't set.
++// In-process, since a Sailjail sandbox has no dconf tool (or shell) to run.
++std::string ReadDconf(const char* key) {
++  DConfClient* client = dconf_client_new();
++  GVariant* value = dconf_client_read(client, key);
++  g_object_unref(client);
++  if (!value) {
++    return std::string();
++  }
++  gchar* text = g_variant_print(value, TRUE);
++  std::string result(text);
++  g_free(text);
++  g_variant_unref(value);
++  return result;
++}
++
+ double ReadDconfDouble(const char* key) {
+-  char cmd[256];
+-  std::snprintf(cmd, sizeof(cmd), "dconf read %s 2>/dev/null", key);
+-  FILE* pipe = popen(cmd, "r");
+-  if (!pipe) {
+-    return 0.0;
+-  }
+-  char buf[128] = {};
+-  if (!std::fgets(buf, sizeof(buf), pipe)) {
+-    pclose(pipe);
+-    return 0.0;
+-  }
+-  pclose(pipe);
+-  char stripped[128] = {};
+-  size_t j = 0;
+-  for (size_t i = 0; buf[i] != '\0' && j + 1 < sizeof(stripped); ++i) {
+-    const char c = buf[i];
++  std::string stripped;
++  for (const char c : ReadDconf(key)) {
+     if (c != '\'' && c != '"' && c != ' ' && c != '\n' && c != '\r' &&
+         c != '\t') {
+-      stripped[j++] = c;
++      stripped += c;
+     }
+   }
+-  return std::atof(stripped);
++  return std::atof(stripped.c_str());
+ }
+ 
+ double ReadDevicePixelRatio() {
+@@ -101,17 +105,7 @@ double ReadDevicePixelRatio() {
+ // [x, y, width, height] in native panel pixels.
+ std::vector<PhysicalRect> ReadDisplayCutouts() {
+   std::vector<PhysicalRect> cutouts;
+-  FILE* pipe =
+-      popen("dconf read /desktop/sailfish/silica/cutouts 2>/dev/null", "r");
+-  if (!pipe) {
+-    return cutouts;
+-  }
+-  std::string value;
+-  char buf[256];
+-  while (std::fgets(buf, sizeof(buf), pipe)) {
+-    value += buf;
+-  }
+-  pclose(pipe);
++  const std::string value = ReadDconf("/desktop/sailfish/silica/cutouts");
+ 
+   // Each innermost [...] holds one rectangle.
+   size_t open = value.find('[');

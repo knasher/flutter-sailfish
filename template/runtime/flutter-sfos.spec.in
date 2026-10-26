@@ -29,6 +29,7 @@ BuildRequires:  pkgconfig(wayland-protocols)
 BuildRequires:  pkgconfig(egl)
 BuildRequires:  pkgconfig(glesv2)
 BuildRequires:  pkgconfig(maliit-glib)
+BuildRequires:  pkgconfig(dconf)
 Requires:       maliit-framework-wayland-glib
 Provides:       flutter-sfos = %{version}
 
