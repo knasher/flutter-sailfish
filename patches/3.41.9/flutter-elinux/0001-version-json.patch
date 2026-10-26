@@ -1,0 +1,71 @@
+Write version.json into flutter_assets, as Flutter's Linux builds do.
+
+`flutter build linux` writes data/flutter_assets/version.json from
+pubspec.yaml (or --build-name/--build-number), and package_info_plus reads
+the app's version and build number from it. flutter-elinux's asset bundle
+didn't write it, so package_info_plus gave an empty version on eLinux. This
+copies BundleLinuxAssets.getVersionInfo from Flutter's linux.dart.
+
+Not specific to Sailfish OS; worth offering to flutter-elinux.
+
+--- a/lib/elinux_build_target.dart
++++ b/lib/elinux_build_target.dart
+@@ -4,6 +4,7 @@
+ // Use of this source code is governed by a BSD-style license that can be
+ // found in the LICENSE file.
+ 
++import 'dart:convert';
+ import 'dart:io';
+ 
+ import 'package:flutter_tools/src/artifacts.dart';
+@@ -22,6 +23,7 @@
+ import 'package:flutter_tools/src/build_system/targets/native_assets.dart';
+ import 'package:flutter_tools/src/cache.dart';
+ import 'package:flutter_tools/src/cmake.dart';
++import 'package:flutter_tools/src/devfs.dart';
+ import 'package:flutter_tools/src/globals.dart' as globals;
+ import 'package:flutter_tools/src/isolated/native_assets/dart_hook_result.dart';
+ import 'package:flutter_tools/src/project.dart';
+@@ -43,6 +45,7 @@
+   @override
+   List<Source> get inputs => const <Source>[
+         Source.pattern('{BUILD_DIR}/app.dill'),
++        Source.pattern('{PROJECT_DIR}/pubspec.yaml'),
+         ...IconTreeShaker.inputs,
+       ];
+ 
+@@ -94,6 +97,9 @@
+       targetPlatform: tp,
+       buildMode: buildMode,
+       flavor: environment.defines[kFlavor],
++      additionalContent: <String, DevFSContent>{
++        'version.json': DevFSStringContent(getVersionInfo(environment.defines)),
++      },
+     );
+     final DepfileService depfileService = DepfileService(
+       fileSystem: environment.fileSystem,
+@@ -103,6 +109,24 @@
+       assetDepfile,
+       environment.buildDir.childFile('flutter_assets.d'),
+     );
++  }
++
++  /// Return json encoded string that contains data about version for package_info
++  ///
++  /// Source: `BundleLinuxAssets.getVersionInfo` in `linux.dart`
++  String getVersionInfo(Map<String, String> defines) {
++    final Map<String, dynamic> versionInfo =
++        jsonDecode(FlutterProject.current().getVersionInfo()) as Map<String, dynamic>;
++
++    if (defines.containsKey(kBuildNumber)) {
++      versionInfo['build_number'] = defines[kBuildNumber];
++    }
++
++    if (defines.containsKey(kBuildName)) {
++      versionInfo['version'] = defines[kBuildName];
++    }
++
++    return jsonEncode(versionInfo);
+   }
+ }
+ 

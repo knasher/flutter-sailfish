@@ -1,6 +1,7 @@
 #!/bin/sh
 # Clone upstream into third_party/ (not submodules — pins differ per Flutter
-# version), checkout the pin, apply patches, copy into versions/<ver>/runtime/src.
+# version), checkout the pin, copy into versions/<ver>/runtime/src and
+# runtime/flutter-elinux, and apply patches/<ver> and patches/<ver>/flutter-elinux.
 set -eu
 
 ROOT=$(CDPATH= cd -- "$(dirname "$0")/.." && pwd)
@@ -55,6 +56,12 @@ mkdir -p "$ELINUX_DEST"
 tar -C "$ROOT/third_party/flutter-elinux" \
 	--exclude=.git --exclude=flutter --exclude=bin/cache \
 	-cf - . | tar -C "$ELINUX_DEST" -xf -
+if ls "$PATCHDIR/flutter-elinux/"*.patch >/dev/null 2>&1; then
+	for p in "$PATCHDIR/flutter-elinux/"*.patch; do
+		echo "apply flutter-elinux/$(basename "$p")"
+		patch -d "$ELINUX_DEST" -p1 < "$p"
+	done
+fi
 test -f "$ELINUX_DEST/bin/flutter_elinux.dart"
 test -f "$ELINUX_DEST/bin/flutter-elinux"
 

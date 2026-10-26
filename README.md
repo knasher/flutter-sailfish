@@ -76,6 +76,7 @@ make FLUTTER=X.Y.Z engine runtime
 Makefile                            # engine / runtime / hello / deploy
 versions/<ver>/pin.env              # ENGINE_HASH, ELINUX_ENGINE_HASH, EMBEDDER_REV, ELINUX_REV, RELEASE
 patches/<ver>/                      # embedder diffs; symlink to a previous ver if unchanged
+patches/<ver>/flutter-elinux/       # flutter-elinux (build tool) diffs
 engine/                             # Dockerfile (linux/arm64)
 examples/hello/                     # sample app; `./elinux/build.sh` → sfosbuild .
 template/elinux/                    # copy into an app as elinux/
