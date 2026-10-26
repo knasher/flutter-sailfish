@@ -218,6 +218,7 @@ Add the ones you use next to the plugin itself:
 | shared_preferences | [shared_preferences_sailfish](../packages/shared_preferences_sailfish) | Kept in the app's data folder |
 | flutter_secure_storage | [flutter_secure_storage_sailfish](../packages/flutter_secure_storage_sailfish) | A private file, not encrypted ([how safe](../packages/flutter_secure_storage_sailfish/README.md#how-safe-it-is)) |
 | package_info_plus | [package_info_plus_sailfish](../packages/package_info_plus_sailfish) | Name and id from the desktop file |
+| connectivity_plus | [connectivity_plus_sailfish](../packages/connectivity_plus_sailfish) | From ConnMan; needs the `Internet` permission |
 
 ## Sandboxing (Sailjail)
 
