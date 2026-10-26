@@ -215,6 +215,7 @@ Add the ones you use next to the plugin itself:
 | Plugin | Sailfish package | Notes |
 |---|---|---|
 | path_provider | [path_provider_sailfish](../packages/path_provider_sailfish) | The app's Sailjail folders |
+| shared_preferences | [shared_preferences_sailfish](../packages/shared_preferences_sailfish) | Kept in the app's data folder |
 
 ## Sandboxing (Sailjail)
 
