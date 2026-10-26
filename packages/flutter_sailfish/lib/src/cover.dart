@@ -37,7 +37,10 @@ class CoverAction {
 class SailfishCover {
   SailfishCover._();
 
-  static const _channel = BasicMessageChannel<Object?>('flutter-sfos/cover', JSONMessageCodec());
+  static const _channel = BasicMessageChannel<Object?>(
+    'flutter-sfos/cover',
+    JSONMessageCodec(),
+  );
   static const _frameChannel = 'flutter-sfos/cover_frame';
 
   /// Whether the home screen is showing the cover.
@@ -65,7 +68,8 @@ class SailfishCover {
     _channel.send({
       'version': 1,
       'actions': [
-        for (var i = 0; i < actions.length; i++) {'id': i, 'icon': actions[i].icon},
+        for (var i = 0; i < actions.length; i++)
+          {'id': i, 'icon': actions[i].icon},
       ],
     });
     _changed();
@@ -124,7 +128,13 @@ class SailfishCover {
     try {
       final view = ui.PlatformDispatcher.instance.implicitView!;
       final dpr = view.devicePixelRatio;
-      _offscreen ??= _OffscreenCover(_cover!, Size(_width / dpr, _height / dpr), dpr, view, _changed);
+      _offscreen ??= _OffscreenCover(
+        _cover!,
+        Size(_width / dpr, _height / dpr),
+        dpr,
+        view,
+        _changed,
+      );
       final image = await _offscreen!.capture();
       final rgba = await image.toByteData(format: ui.ImageByteFormat.rawRgba);
       final width = image.width, height = image.height;
@@ -137,8 +147,15 @@ class SailfishCover {
       ByteData.sublistView(message)
         ..setUint32(0, width, Endian.little)
         ..setUint32(4, height, Endian.little);
-      message.setRange(8, message.length, rgba.buffer.asUint8List(rgba.offsetInBytes, rgba.lengthInBytes));
-      await ServicesBinding.instance.defaultBinaryMessenger.send(_frameChannel, ByteData.sublistView(message));
+      message.setRange(
+        8,
+        message.length,
+        rgba.buffer.asUint8List(rgba.offsetInBytes, rgba.lengthInBytes),
+      );
+      await ServicesBinding.instance.defaultBinaryMessenger.send(
+        _frameChannel,
+        ByteData.sublistView(message),
+      );
       _drawn = true;
     } finally {
       _rendering = false;
@@ -151,7 +168,11 @@ class SailfishCover {
 
 /// Draws [cover] off-screen at [size] (logical pixels) once, for tests.
 @visibleForTesting
-Future<ui.Image> debugRenderCover(Widget cover, Size size, double devicePixelRatio) {
+Future<ui.Image> debugRenderCover(
+  Widget cover,
+  Size size,
+  double devicePixelRatio,
+) {
   final view = ui.PlatformDispatcher.instance.implicitView!;
   return _OffscreenCover(cover, size, devicePixelRatio, view, () {}).capture();
 }
@@ -159,7 +180,13 @@ Future<ui.Image> debugRenderCover(Widget cover, Size size, double devicePixelRat
 // A widget tree of its own, laid out at the cover's size and painted on
 // demand. Its RenderView is never composited into the app's view.
 class _OffscreenCover {
-  _OffscreenCover(Widget cover, Size size, this.dpr, ui.FlutterView view, VoidCallback onChanged) {
+  _OffscreenCover(
+    Widget cover,
+    Size size,
+    this.dpr,
+    ui.FlutterView view,
+    VoidCallback onChanged,
+  ) {
     final renderView = RenderView(
       view: view,
       child: RenderPositionedBox(child: _boundary),
@@ -169,9 +196,13 @@ class _OffscreenCover {
         devicePixelRatio: dpr,
       ),
     );
-    _pipelineOwner = PipelineOwner(onNeedVisualUpdate: onChanged)..rootNode = renderView;
+    _pipelineOwner = PipelineOwner(onNeedVisualUpdate: onChanged)
+      ..rootNode = renderView;
     renderView.prepareInitialFrame();
-    _buildOwner = BuildOwner(focusManager: FocusManager(), onBuildScheduled: onChanged);
+    _buildOwner = BuildOwner(
+      focusManager: FocusManager(),
+      onBuildScheduled: onChanged,
+    );
     _element = RenderObjectToWidgetAdapter<RenderBox>(
       container: _boundary,
       child: MediaQuery(

@@ -52,3 +52,7 @@ app.*.map.json
 /android/app/debug
 /android/app/profile
 /android/app/release
+
+# Written by elinux/build.sh for FLUTTER_SAILFISH_PATH
+/.flutter_sailfish/
+/pubspec_overrides.yaml

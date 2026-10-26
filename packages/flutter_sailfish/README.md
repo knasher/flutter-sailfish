@@ -40,8 +40,12 @@ SailfishCover.set(
 - It is redrawn while the home screen shows it, whenever it changes.
   `SailfishCover.visible` tells you when it's shown, for example to run a
   timer only then.
-- Cover buttons are drawn by the home screen from Sailfish theme
-  icons such as `icon-cover-refresh`, `icon-cover-next` or `icon-cover-pause`.
-  Leave room for them at the bottom of the cover.
+- Cover buttons are drawn by the home screen from Sailfish theme icons. Leave
+  room for them at the bottom of the cover. The theme on SFOS 5.2 has:
+  `icon-cover-alarm`, `-answer`, `-backup`, `-camera`, `-cancel`, `-dialer`,
+  `-favorite`, `-hangup`, `-location`, `-message`, `-mute`, `-new`, `-next`,
+  `-next-song`, `-pause`, `-people`, `-play`, `-previous`, `-previous-song`,
+  `-refresh`, `-reject`, `-search`, `-shuffle`, `-subview`, `-sync`,
+  `-timer`, `-transfers` and `-unmute`.
 
 Needs a runtime with patch 0010.

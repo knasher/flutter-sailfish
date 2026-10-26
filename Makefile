@@ -72,6 +72,7 @@ runtime: engine embedder
 hello: runtime
 	FLUTTER_VERSION=$(FLUTTER) \
 	FLUTTER_SFOS_RPMS=$(abspath versions/$(FLUTTER)/runtime/rpms) \
+	FLUTTER_SAILFISH_PATH=$(abspath packages/flutter_sailfish) \
 		./examples/hello/elinux/build.sh
 
 app: runtime
@@ -80,12 +81,14 @@ app: runtime
 		echo "missing $(APP)/elinux/build.sh — copy template/elinux, template/rpm, template/.sfosbuild" >&2; exit 1; }
 	FLUTTER_VERSION=$(FLUTTER) \
 	FLUTTER_SFOS_RPMS=$(abspath versions/$(FLUTTER)/runtime/rpms) \
+	FLUTTER_SAILFISH_PATH=$(abspath packages/flutter_sailfish) \
 		"$(APP)/elinux/build.sh"
 
 deploy: runtime hello
 	sfosbuild deploy $(DEVICE) $(RUNTIME)
 	FLUTTER_VERSION=$(FLUTTER) DEVICE=$(DEVICE) \
 	FLUTTER_SFOS_RPMS=$(abspath versions/$(FLUTTER)/runtime/rpms) \
+	FLUTTER_SAILFISH_PATH=$(abspath packages/flutter_sailfish) \
 		./examples/hello/elinux/build.sh deploy
 
 clean:

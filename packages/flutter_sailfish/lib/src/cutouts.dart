@@ -13,7 +13,10 @@ import 'package:flutter/widgets.dart';
 class SailfishCutouts {
   SailfishCutouts._();
 
-  static const _channel = BasicMessageChannel<Object?>('flutter-sfos/display_cutouts', JSONMessageCodec());
+  static const _channel = BasicMessageChannel<Object?>(
+    'flutter-sfos/display_cutouts',
+    JSONMessageCodec(),
+  );
 
   static final _padding = ValueNotifier<EdgeInsets>(EdgeInsets.zero);
   static bool _listening = false;
@@ -57,7 +60,12 @@ class SailfishCutouts {
       if (message is Map && message['padding'] is Map) {
         final p = message['padding'] as Map;
         double v(String k) => (p[k] as num? ?? 0).toDouble();
-        _padding.value = EdgeInsets.fromLTRB(v('left'), v('top'), v('right'), v('bottom'));
+        _padding.value = EdgeInsets.fromLTRB(
+          v('left'),
+          v('top'),
+          v('right'),
+          v('bottom'),
+        );
       }
       return null;
     });
