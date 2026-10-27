@@ -1,0 +1,28 @@
+name: video_player_sailfish
+description: Sailfish OS implementation of video_player, playing video with GStreamer. Based on Sony's video_player_elinux.
+version: 0.1.0
+# Not published yet.
+publish_to: none
+
+environment:
+  sdk: ^3.11.5
+  flutter: ">=3.41.0"
+
+dependencies:
+  flutter:
+    sdk: flutter
+  video_player_platform_interface: ^6.9.0
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+
+# A native plugin (GStreamer) with a Dart side; flutter-elinux builds and
+# registers both in Sailfish builds.
+flutter:
+  plugin:
+    implements: video_player
+    platforms:
+      elinux:
+        pluginClass: VideoPlayerSailfishPlugin
+        dartPluginClass: VideoPlayerSailfish
