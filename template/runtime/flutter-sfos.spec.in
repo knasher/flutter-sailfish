@@ -86,6 +86,9 @@ if grep -q 'FlutterEdgeInsets physical_padding;' engine/flutter_embedder.h; then
 	view_padding=ON
 fi
 
+# ENABLE_VSYNC: frames follow Lipstick's frame callbacks at the display's
+# refresh rate. Without it (Sony's default) the engine uses its own 60 Hz
+# timer, out of step with a 90 Hz Lipstick, and animations judder.
 cmake -S "$src" -B build-client \
 	-DCMAKE_BUILD_TYPE=Release \
 	-DFLUTTER_RELEASE=ON \
@@ -94,6 +97,7 @@ cmake -S "$src" -B build-client \
 	-DUSER_PROJECT_PATH=examples/flutter-wayland-client \
 	-DFLUTTER_SFOS_LIBDIR="$libdir" \
 	-DFLUTTER_SFOS_VIEW_PADDING="$view_padding" \
+	-DENABLE_VSYNC=ON \
 	-DCMAKE_C_COMPILER=clang \
 	-DCMAKE_CXX_COMPILER=clang++
 
@@ -106,6 +110,7 @@ cmake -S "$src" -B build-so \
 	-DBUILD_ELINUX_SO=ON \
 	-DFLUTTER_SFOS_LIBDIR="$libdir" \
 	-DFLUTTER_SFOS_VIEW_PADDING="$view_padding" \
+	-DENABLE_VSYNC=ON \
 	-DCMAKE_C_COMPILER=clang \
 	-DCMAKE_CXX_COMPILER=clang++
 
