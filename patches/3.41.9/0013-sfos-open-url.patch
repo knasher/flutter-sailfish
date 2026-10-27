@@ -1,17 +1,8 @@
 Open URLs through Lipstick, as Qt apps do.
 
-Sailjail's sandbox leaves apps no way of their own to open a URL: there's no
-xdg-open in it, and no permission allows Lipstick's org.sailfishos.fileservice
-D-Bus service. Qt apps send the URL to the compositor with the
-qt_windowmanager Wayland extension instead, and Lipstick opens it with
-libcontentaction, outside the sandbox.
+Sailjail's sandbox leaves apps no way of their own to open a URL: there's no xdg-open in it, and no permission allows Lipstick's org.sailfishos.fileservice D-Bus service. Qt apps send the URL to the compositor with the qt_windowmanager Wayland extension instead, and Lipstick opens it with libcontentaction, outside the sandbox.
 
-The runtime now binds qt_windowmanager (protocol file from QtWayland 5.15,
-BSD like surface-extension.xml) and offers it on the JSON method channel
-flutter-sfos/open_url: openUrl with the URL returns false if the compositor
-doesn't offer it. Long URLs go in 128-byte parts, as Qt sends them, each
-ending on a whole UTF-8 character. Checking that an app handles the URL is
-left to the caller.
+The runtime now binds qt_windowmanager (protocol file from QtWayland 5.15, BSD like surface-extension.xml) and offers it on the JSON method channel flutter-sfos/open_url: openUrl with the URL returns false if the compositor doesn't offer it. Long URLs go in 128-byte parts, as Qt sends them, each ending on a whole UTF-8 character. Checking that an app handles the URL is left to the caller.
 
 diff --git a/cmake/build.cmake b/cmake/build.cmake
 index 626dcac..dfcc527 100644
