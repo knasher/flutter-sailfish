@@ -1,0 +1,31 @@
+name: screen_brightness_sailfish
+description: Sailfish OS implementation of screen_brightness. Sets the display brightness through MCE, and puts the phone's setting back afterwards.
+version: 0.1.0
+# Not published yet.
+publish_to: none
+
+environment:
+  sdk: ^3.11.5
+  flutter: ">=3.41.0"
+
+dependencies:
+  dbus: ^0.7.11
+  flutter:
+    sdk: flutter
+  path_provider_sailfish:
+    path: ../path_provider_sailfish
+  screen_brightness_platform_interface: ^2.1.1
+
+dev_dependencies:
+  async: ^2.11.0
+  flutter_test:
+    sdk: flutter
+
+# flutter-elinux registers elinux Dart plugins after Flutter registers the
+# Linux ones; screen_brightness has no Linux version.
+flutter:
+  plugin:
+    implements: screen_brightness
+    platforms:
+      elinux:
+        dartPluginClass: ScreenBrightnessSailfish
