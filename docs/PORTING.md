@@ -91,10 +91,18 @@ the runtime built here. `./elinux/build.sh` does the same when
 
 ### Camera cut-outs
 
-Apps run full screen, so content is drawn under the camera cut-out, and the
-Flutter embedder API can't set `MediaQuery.padding`. Use the package's builder
-wherever the app creates its `MaterialApp` (in `MyApp.build` for a project made
-with `flutter create`):
+Apps run full screen, so content is drawn under the camera cut-out. On
+`flutter-sfos` 7.sfos7 and later there's nothing to do: the runtime reports the
+cut-out as `MediaQuery.padding` (view padding), as Android and iOS do, so
+`AppBar` draws its background behind the cut-out and keeps its contents below
+it, and `SafeArea` and scroll views keep clear of it, in every orientation.
+This needs a Flutter engine with `patches/<ver>/engine/0001-view-padding.patch`
+(the embedder API had no view padding) and embedder patch 0014; the runtime
+build checks the engine and only reports padding when it can.
+
+On older runtimes (patch 0009 only), use the package's builder wherever the
+app creates its `MaterialApp` (in `MyApp.build` for a project made with
+`flutter create`). It's safe to keep on newer runtimes, where it adds nothing:
 
 ```dart
 import 'package:flutter_sailfish/flutter_sailfish.dart';
@@ -108,18 +116,17 @@ return MaterialApp(
 If the `MaterialApp` already has a `builder`, wrap it:
 `builder: (context, child) => SailfishCutouts.builder(context, yourBuilder(context, child))`.
 
-`AppBar` then draws its background behind the cut-out and keeps its contents
-below it, and `SafeArea` and scroll views keep clear of it, as on a phone with
-a notch. Needs a `flutter-sfos` runtime with patch 0009.
-
 How it works: the runtime reads the cut-outs from the device's Silica settings
-and sends them, at start-up and whenever the orientation changes, as JSON on
+and, at start-up and whenever the orientation changes, puts the padding in the
+window metrics (with the engine patch) and sends the cut-outs as JSON on
 `flutter-sfos/display_cutouts`, in physical pixels for the current
-orientation (`version` changes only if the format changes incompatibly):
+orientation. `in_metrics` says the padding is already in `MediaQuery`
+(`version` changes only if the format changes incompatibly):
 
 ```json
 {"version": 1,
  "padding": {"top": 66, "right": 0, "bottom": 0, "left": 0},
+ "in_metrics": true,
  "cutouts": [{"left": 310, "top": 0, "width": 414, "height": 66}]
 }
 ```

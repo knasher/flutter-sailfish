@@ -4,12 +4,12 @@ import 'package:flutter/widgets.dart';
 
 /// Keeps content clear of display cut-outs, such as a camera notch.
 ///
-/// Sailfish apps run full screen and are drawn under the cut-out, and the
-/// Flutter embedder API can't set [MediaQueryData.padding], so the runtime
-/// sends the cut-outs on a channel and [builder] applies them. With it, app
-/// bars draw their background behind the cut-out and keep their contents
-/// below it, and [SafeArea] and scroll views keep clear of it, as on phones
-/// with a notch elsewhere.
+/// Sailfish apps run full screen and are drawn under the cut-out. Runtimes
+/// with the view padding patch (flutter-sfos 7.sfos7 and later) report it
+/// in [MediaQueryData.padding] themselves, so app bars, [SafeArea] and
+/// scroll views keep clear of it in every app, as on phones with a notch
+/// elsewhere, and [builder] adds nothing. Older runtimes only send the
+/// cut-outs on a channel, and [builder] applies them.
 class SailfishCutouts {
   SailfishCutouts._();
 
@@ -19,6 +19,8 @@ class SailfishCutouts {
   );
 
   static final _padding = ValueNotifier<EdgeInsets>(EdgeInsets.zero);
+  // What [builder] adds: the padding, unless the runtime already reports it.
+  static final _extra = ValueNotifier<EdgeInsets>(EdgeInsets.zero);
   static bool _listening = false;
 
   /// The padding that keeps content clear of the cut-outs, in physical
@@ -29,14 +31,16 @@ class SailfishCutouts {
   }
 
   /// Adds the cut-out padding to [MediaQueryData.padding] and
-  /// [MediaQueryData.viewPadding]. Use it as the app's builder:
+  /// [MediaQueryData.viewPadding] on runtimes that don't report it
+  /// themselves. Use it as the app's builder:
   ///
   /// ```dart
   /// MaterialApp(builder: SailfishCutouts.builder, home: const MyHomePage())
   /// ```
   static Widget builder(BuildContext context, Widget? child) {
+    _listen();
     return ValueListenableBuilder<EdgeInsets>(
-      valueListenable: padding,
+      valueListenable: _extra,
       builder: (context, padding, _) {
         final mq = MediaQuery.of(context);
         final extra = padding / mq.devicePixelRatio;
@@ -60,12 +64,16 @@ class SailfishCutouts {
       if (message is Map && message['padding'] is Map) {
         final p = message['padding'] as Map;
         double v(String k) => (p[k] as num? ?? 0).toDouble();
-        _padding.value = EdgeInsets.fromLTRB(
+        final padding = EdgeInsets.fromLTRB(
           v('left'),
           v('top'),
           v('right'),
           v('bottom'),
         );
+        _padding.value = padding;
+        _extra.value = message['in_metrics'] == true
+            ? EdgeInsets.zero
+            : padding;
       }
       return null;
     });

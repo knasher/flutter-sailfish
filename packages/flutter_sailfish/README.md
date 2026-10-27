@@ -7,16 +7,19 @@ Not published on pub.dev yet.
 
 ## Display cut-outs
 
-Apps run full screen, so they are drawn under the camera cut-out. Use
-`SailfishCutouts.builder` as the app's builder so that app bars draw behind the
-cut-out with their contents below it, and `SafeArea` and scroll views keep
-clear of it:
+Apps run full screen, so they are drawn under the camera cut-out. Runtimes
+with the view padding patches (flutter-sfos 7.sfos7 and later: engine patch
+plus 0014) report the cut-out in `MediaQuery.padding`, so app bars draw behind
+it with their contents below, and `SafeArea` and scroll views keep clear of
+it, in every app with no code.
+
+On older runtimes (patch 0009 only), use `SailfishCutouts.builder` as the
+app's builder for the same result. It's safe to keep: on newer runtimes it
+adds nothing.
 
 ```dart
 MaterialApp(builder: SailfishCutouts.builder, home: const MyHomePage())
 ```
-
-Needs a runtime with patch 0009.
 
 ## App cover
 

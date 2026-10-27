@@ -76,6 +76,14 @@ cp -f engine/libflutter_engine.so "$src/build/libflutter_engine.so"
 export CC=clang
 export CXX=clang++
 
+# Whether the engine reports view padding (its view padding patch, which
+# adds these fields to the embedder API). Only then does the embedder tell
+# apps the cut-out padding is already in MediaQuery.padding.
+view_padding=OFF
+if grep -q physical_view_padding_top engine/flutter_embedder.h; then
+	view_padding=ON
+fi
+
 cmake -S "$src" -B build-client \
 	-DCMAKE_BUILD_TYPE=Release \
 	-DFLUTTER_RELEASE=ON \
@@ -83,6 +91,7 @@ cmake -S "$src" -B build-client \
 	-DBUILD_ELINUX_SO=OFF \
 	-DUSER_PROJECT_PATH=examples/flutter-wayland-client \
 	-DFLUTTER_SFOS_LIBDIR="$libdir" \
+	-DFLUTTER_SFOS_VIEW_PADDING="$view_padding" \
 	-DCMAKE_C_COMPILER=clang \
 	-DCMAKE_CXX_COMPILER=clang++
 
@@ -94,6 +103,7 @@ cmake -S "$src" -B build-so \
 	-DBACKEND_TYPE=WAYLAND \
 	-DBUILD_ELINUX_SO=ON \
 	-DFLUTTER_SFOS_LIBDIR="$libdir" \
+	-DFLUTTER_SFOS_VIEW_PADDING="$view_padding" \
 	-DCMAKE_C_COMPILER=clang \
 	-DCMAKE_CXX_COMPILER=clang++
 

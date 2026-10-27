@@ -19,6 +19,23 @@ IMAGE=${ENGINE_IMAGE:-flutter-sfos-engine:$FLUTTER}
 STAMP="$DEST/.hash"
 PLATFORM=linux/arm64
 
+# Engine patches (patches/<ver>/engine), applied inside the container.
+ENGINE_PATCHES=
+if ls "$ROOT/patches/$FLUTTER/engine/"*.patch >/dev/null 2>&1; then
+	ENGINE_PATCHES=$(cd "$ROOT/patches/$FLUTTER/engine" && pwd -P)
+fi
+
+# The stamp: the engine hash, plus the patches' checksum if there are any,
+# so changing a patch means a rebuild.
+engine_stamp() {
+	if [ -n "$ENGINE_PATCHES" ]; then
+		printf '%s+%s\n' "$ENGINE_HASH" \
+			"$(cat "$ENGINE_PATCHES"/*.patch | cksum | cut -d' ' -f1)"
+	else
+		printf '%s\n' "$ENGINE_HASH"
+	fi
+}
+
 sdk_complete() {
 	root=$1
 	[ -d "$root/.git/objects" ] || return 1
@@ -51,11 +68,11 @@ already() {
 	sdk_complete "$DEST/sdk" || return 1
 	[ "$(cat "$DEST/.arch" 2>/dev/null || true)" = aarch64 ] || return 1
 	got=$(cat "$STAMP" 2>/dev/null || true)
-	if [ -z "$got" ]; then
-		printf '%s\n' "$ENGINE_HASH" >"$STAMP"
+	if [ -z "$got" ] && [ -z "$ENGINE_PATCHES" ]; then
+		engine_stamp >"$STAMP"
 		return 0
 	fi
-	[ "$got" = "$ENGINE_HASH" ]
+	[ "$got" = "$(engine_stamp)" ]
 }
 
 copy_runtime_bits() {
@@ -72,8 +89,8 @@ copy_runtime_bits() {
 finish() {
 	"$ROOT/scripts/fetch-elinux-artifacts.sh"
 	copy_runtime_bits
-	printf '%s\n' "$ENGINE_HASH" >"$STAMP"
-	echo "engine $ENGINE_HASH ($FLUTTER, aarch64) -> $DEST"
+	engine_stamp >"$STAMP"
+	echo "engine $(engine_stamp) ($FLUTTER, aarch64) -> $DEST"
 }
 
 if [ "${FORCE:-}" != 1 ] && already; then
@@ -98,6 +115,10 @@ docker build --platform "$PLATFORM" \
 	"$ROOT/engine"
 
 echo "docker run --platform $PLATFORM (ninja cache $CACHE/out)"
+set --
+if [ -n "$ENGINE_PATCHES" ]; then
+	set -- -v "$ENGINE_PATCHES:/patches:ro"
+fi
 docker run --rm \
 	--platform "$PLATFORM" \
 	-e HOME=/tmp \
@@ -109,6 +130,7 @@ docker run --rm \
 	-v "$CACHE/out:/opt/flutter/engine/src/out" \
 	-v "$DEST:/out" \
 	-v "$ROOT/engine/build.sh:/usr/local/bin/build-engine:ro" \
+	"$@" \
 	"$IMAGE"
 
 test -f "$DEST/libflutter_engine.so"

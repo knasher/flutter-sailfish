@@ -48,4 +48,35 @@ void main() {
     final dpr = tester.view.devicePixelRatio;
     expect(find.text('${66 / dpr}'), findsOneWidget);
   });
+
+  testWidgets('adds nothing when the runtime reports the padding', (
+    tester,
+  ) async {
+    // The runtime puts the cut-out in the window metrics (view padding).
+    tester.view.padding = const FakeViewPadding(top: 66);
+    addTearDown(tester.view.resetPadding);
+    await tester.pumpWidget(
+      MaterialApp(
+        builder: SailfishCutouts.builder,
+        home: Builder(
+          builder: (context) => Text('${MediaQuery.paddingOf(context).top}'),
+        ),
+      ),
+    );
+    final message = const JSONMessageCodec().encodeMessage({
+      'version': 1,
+      'padding': {'top': 66, 'right': 0, 'bottom': 0, 'left': 0},
+      'in_metrics': true,
+      'cutouts': [],
+    });
+    await tester.binding.defaultBinaryMessenger.handlePlatformMessage(
+      'flutter-sfos/display_cutouts',
+      message,
+      (_) {},
+    );
+    await tester.pump();
+    final dpr = tester.view.devicePixelRatio;
+    expect(find.text('${66 / dpr}'), findsOneWidget);
+    expect(SailfishCutouts.padding.value.top, 66);
+  });
 }

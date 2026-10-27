@@ -1,0 +1,118 @@
+Report the display cut-outs as view padding (needs 0009).
+
+0009 sends the cut-out padding on flutter-sfos/display_cutouts, and apps had to add it to MediaQuery themselves (flutter_sailfish's SailfishCutouts.builder), because the embedder API had no view padding. With the engine's view padding patch (patches/<ver>/engine/0001-view-padding.patch), the padding goes in the window metrics instead, so MediaQuery.padding, SafeArea and app bars avoid the cut-out in every app.
+
+The embedder's FlutterWindowMetricsEvent gains the engine's size constraint fields (sent as no constraints) and the padding fields, in the engine's order; engines without the patch ignore the padding. Metrics are sent again when only the content orientation changes, since turning upside down moves the cut-out without resizing. When built with FLUTTER_SFOS_VIEW_PADDING (the runtime spec sets it if the engine's flutter_embedder.h has the padding fields), the cut-out message says "in_metrics": true, so SailfishCutouts.builder doesn't add the padding a second time.
+
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 6590e93..edd7ad4 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -23,6 +23,7 @@ option(BUILD_ELINUX_SO "Build .so file of elinux embedder" OFF)
+ option(ENABLE_ELINUX_EMBEDDER_LOG "Enable logger of eLinux embedder" ON)
+ option(FLUTTER_RELEASE "Build Flutter Engine with release mode" OFF)
+ set(FLUTTER_SFOS_LIBDIR "" CACHE STRING "RPATH to the versioned flutter-sfos library directory")
++option(FLUTTER_SFOS_VIEW_PADDING "The engine takes view padding (its view padding patch)" OFF)
+ 
+ if(NOT BUILD_ELINUX_SO)
+   # Load the user project.
+diff --git a/cmake/build.cmake b/cmake/build.cmake
+index dfcc527..77d4292 100644
+--- a/cmake/build.cmake
++++ b/cmake/build.cmake
+@@ -108,6 +108,11 @@ if(USE_DIRTY_REGION_MANAGEMENT)
+   add_definitions(-DUSE_OPENGL_DIRTY_REGION_MANAGEMENT)
+ endif()
+ 
++# The engine reports the cut-out padding the embedder sends (view padding).
++if(FLUTTER_SFOS_VIEW_PADDING)
++  add_definitions(-DFLUTTER_SFOS_VIEW_PADDING)
++endif()
++
+ # OpenGL ES version.
+ if(USE_GLES3)
+   add_definitions(-DUSE_GLES3)
+diff --git a/src/flutter/shell/platform/embedder/embedder.h b/src/flutter/shell/platform/embedder/embedder.h
+index 9e9b875..8b65890 100644
+--- a/src/flutter/shell/platform/embedder/embedder.h
++++ b/src/flutter/shell/platform/embedder/embedder.h
+@@ -927,6 +927,28 @@ typedef struct {
+   FlutterEngineDisplayId display_id;
+   /// The view that this event is describing.
+   int64_t view_id;
++  /// If `true`, the window has size constraints.
++  /// If `false`, the constraint values are ignored.
++  bool has_constraints;
++  /// Minimum physical width of the window.
++  size_t min_width_constraint;
++  /// Minimum physical height of the window.
++  size_t min_height_constraint;
++  /// Maximum physical width of the window.
++  size_t max_width_constraint;
++  /// Maximum physical height of the window.
++  size_t max_height_constraint;
++  /// Top padding of window: the part covered by system UI or a display
++  /// cut-out, which content should avoid. Flutter reports it as
++  /// `viewPadding`. Needs an engine with the view padding patch; others
++  /// ignore it.
++  double physical_view_padding_top;
++  /// Right padding of window.
++  double physical_view_padding_right;
++  /// Bottom padding of window.
++  double physical_view_padding_bottom;
++  /// Left padding of window.
++  double physical_view_padding_left;
+ } FlutterWindowMetricsEvent;
+ 
+ typedef struct {
+diff --git a/src/flutter/shell/platform/linux_embedded/flutter_elinux_view.cc b/src/flutter/shell/platform/linux_embedded/flutter_elinux_view.cc
+index 0e2b168..1fec726 100644
+--- a/src/flutter/shell/platform/linux_embedded/flutter_elinux_view.cc
++++ b/src/flutter/shell/platform/linux_embedded/flutter_elinux_view.cc
+@@ -137,6 +137,8 @@ void FlutterELinuxView::OnContentOrientationChanged() {
+   if (textinput_handler_) {
+     textinput_handler_->OnContentOrientationChanged();
+   }
++  // Turning upside down keeps the size but moves the cut-out padding.
++  OnWindowMetricsChanged();
+   if (display_cutout_handler_) {
+     display_cutout_handler_->SendDisplayCutouts();
+   }
+@@ -449,6 +451,13 @@ void FlutterELinuxView::SendWindowMetrics(size_t width_px,
+   event.physical_view_inset_right = insets.right;
+   event.physical_view_inset_bottom = insets.bottom;
+   event.physical_view_inset_left = insets.left;
++  // The display cut-outs, so MediaQuery.padding and SafeArea avoid them.
++  // Engines without the view padding patch ignore these fields.
++  const auto padding = binding_handler_->GetDisplayCutouts().padding;
++  event.physical_view_padding_top = padding.top;
++  event.physical_view_padding_right = padding.right;
++  event.physical_view_padding_bottom = padding.bottom;
++  event.physical_view_padding_left = padding.left;
+   engine_->SendWindowMetricsEvent(event);
+ }
+ 
+diff --git a/src/flutter/shell/platform/linux_embedded/plugins/display_cutout_plugin.cc b/src/flutter/shell/platform/linux_embedded/plugins/display_cutout_plugin.cc
+index 9196e09..a4d4573 100644
+--- a/src/flutter/shell/platform/linux_embedded/plugins/display_cutout_plugin.cc
++++ b/src/flutter/shell/platform/linux_embedded/plugins/display_cutout_plugin.cc
+@@ -18,6 +18,7 @@ constexpr int kMessageVersion = 1;
+ 
+ constexpr char kVersion[] = "version";
+ constexpr char kPadding[] = "padding";
++constexpr char kInMetrics[] = "in_metrics";
+ constexpr char kCutouts[] = "cutouts";
+ constexpr char kTop[] = "top";
+ constexpr char kRight[] = "right";
+@@ -48,6 +49,11 @@ void DisplayCutoutPlugin::SendDisplayCutouts() {
+   padding.AddMember(kBottom, cutouts.padding.bottom, allocator);
+   padding.AddMember(kLeft, cutouts.padding.left, allocator);
+   message.AddMember(kPadding, padding, allocator);
++#ifdef FLUTTER_SFOS_VIEW_PADDING
++  // The engine reports the padding too (view padding), so apps already get
++  // it in MediaQuery.padding and mustn't add it again.
++  message.AddMember(kInMetrics, true, allocator);
++#endif
+ 
+   rapidjson::Value rects(rapidjson::kArrayType);
+   for (const auto& r : cutouts.rects) {

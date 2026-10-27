@@ -43,6 +43,16 @@ OUTDIR=linux_release_arm64
 OUT=$SRC/out/$OUTDIR
 export PATH="$NINJA_PATHS:$PATH"
 
+# Engine patches, mounted at /patches; this checkout is fresh each run.
+applied=
+if ls /patches/*.patch >/dev/null 2>&1; then
+	for p in /patches/*.patch; do
+		echo "engine: apply $(basename "$p")"
+		patch -d "$FLUTTER_ROOT" -p1 <"$p"
+		applied="$applied $(basename "$p")"
+	done
+fi
+
 cd "$SRC"
 if [ -x ./flutter/tools/gn ]; then
 	./flutter/tools/gn \
@@ -131,6 +141,7 @@ if [ -z "$patched_src" ]; then
 fi
 
 mkdir -p /out/bin
+printf '%s\n' "${applied:- none}" >/out/.patches
 rm -rf /out/sdk
 mkdir -p /out/sdk
 install -m 755 "$OUT/libflutter_engine.so" /out/libflutter_engine.so
