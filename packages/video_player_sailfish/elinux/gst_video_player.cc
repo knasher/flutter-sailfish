@@ -30,6 +30,56 @@ void UseSoftwareDecoders() {
     }
   }
 }
+
+// The app's cache folder: ~/.cache/<OrganizationName>/<ApplicationName> from
+// the [X-Sailjail] section of its desktop file, or ~/.cache/<binary name>,
+// found as path_provider_sailfish finds it.
+std::string AppCacheDir() {
+  g_autofree gchar* exe = g_file_read_link("/proc/self/exe", nullptr);
+  g_autofree gchar* binary = g_path_get_basename(exe ? exe : "");
+  g_autofree gchar* desktop = g_strconcat(binary, ".desktop", nullptr);
+  for (const char* dir :
+       {"/usr/share/applications", "/etc/sailjail/applications"}) {
+    g_autofree gchar* path = g_build_filename(dir, desktop, nullptr);
+    g_autoptr(GKeyFile) file = g_key_file_new();
+    if (!g_key_file_load_from_file(file, path, G_KEY_FILE_NONE, nullptr)) {
+      continue;
+    }
+    g_autofree gchar* organization = g_key_file_get_string(
+        file, "X-Sailjail", "OrganizationName", nullptr);
+    g_autofree gchar* application = g_key_file_get_string(
+        file, "X-Sailjail", "ApplicationName", nullptr);
+    if (organization && *organization && application && *application) {
+      g_autofree gchar* cache = g_build_filename(
+          g_get_home_dir(), ".cache", organization, application, nullptr);
+      return cache;
+    }
+  }
+  g_autofree gchar* cache =
+      g_build_filename(g_get_home_dir(), ".cache", binary, nullptr);
+  return cache;
+}
+
+// Sailjail only shows GStreamer's plugin cache (~/.cache/gstreamer-1.0) to
+// apps with the Audio permission. Without it, GStreamer would load every
+// plugin each time it starts (about half a second), so the cache goes in the
+// app's own cache folder instead, unless the app chose one in GST_REGISTRY.
+// GStreamer only takes that path from the environment.
+void UseAppRegistry() {
+  if (g_getenv("GST_REGISTRY") || g_getenv("GST_REGISTRY_1_0")) {
+    return;
+  }
+  g_autofree gchar* shared =
+      g_build_filename(g_get_user_cache_dir(), "gstreamer-1.0", nullptr);
+  if (g_file_test(shared, G_FILE_TEST_IS_DIR)) {
+    return;
+  }
+  const std::string dir = AppCacheDir() + "/gstreamer-1.0";
+  if (g_mkdir_with_parents(dir.c_str(), 0700) != 0) {
+    return;
+  }
+  g_setenv("GST_REGISTRY", (dir + "/registry.bin").c_str(), FALSE);
+}
 }  // namespace
 
 GstVideoPlayer::GstVideoPlayer(
@@ -60,12 +110,13 @@ GstVideoPlayer::~GstVideoPlayer() {
 }
 
 // static
-// Called before the first video rather than at start-up: in Sailjail's
-// sandbox GStreamer can't keep its plugin cache, so it loads every plugin.
+// Called before the first video rather than at start-up, as GStreamer loads
+// every plugin when it has no plugin cache yet.
 void GstVideoPlayer::GstLibraryLoad() {
   if (gst_is_initialized()) {
     return;
   }
+  UseAppRegistry();
   gst_init(NULL, NULL);
   UseSoftwareDecoders();
 }

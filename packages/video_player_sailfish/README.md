@@ -65,8 +65,14 @@ battery.
   fails, so `VideoPlayerController.initialize` throws instead of the app
   hanging. Sony's version waited forever on the platform thread.
 - **Started when needed.** GStreamer is set up before the first video, not at
-  app start: in Sailjail's sandbox it can't keep its plugin cache, so setting
-  up means loading every plugin (about half a second).
+  app start, as without its plugin cache that means loading every plugin
+  (about half a second).
+- **A plugin cache in the sandbox.** Sailjail only shows GStreamer's shared
+  cache (`~/.cache/gstreamer-1.0`) to apps with the `Audio` permission, so
+  for other apps the plugin keeps one in the app's cache folder
+  (`~/.cache/<org>/<app>/gstreamer-1.0`). Only the first video the app ever
+  plays loads every plugin; after that GStreamer starts in a few
+  milliseconds. An app that sets `GST_REGISTRY` keeps its own.
 
 Changes to Sony's code are listed at the top of this file and in the
 comments where they were made.
