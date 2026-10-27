@@ -18,9 +18,6 @@ if(NOT GSTREAMER_FOUND)
     "gstreamer1.0-plugins-base, gstreamer1.0-plugins-good and "
     "gstreamer1.0-libav to Requires (see video_player_sailfish's README).")
 endif()
-if(USE_EGL_IMAGE_DMABUF)
-pkg_check_modules(GSTREAMER_GL REQUIRED gstreamer-gl-1.0)
-endif()
 
 add_library(${PLUGIN_NAME} SHARED
   "video_player_sailfish_plugin.cc"
@@ -39,24 +36,13 @@ target_include_directories(${PLUGIN_NAME}
     ${GLIB_INCLUDE_DIRS}
     ${GSTREAMER_INCLUDE_DIRS}
 )
-if(USE_EGL_IMAGE_DMABUF)
-target_include_directories(${PLUGIN_NAME}
-  PRIVATE
-    ${GSTREAMER_GL_INCLUDE_DIRS}
-)
-endif()
 
 target_link_libraries(${PLUGIN_NAME}
   PRIVATE
     ${GLIB_LIBRARIES}
     ${GSTREAMER_LIBRARIES}
+    ${CMAKE_DL_LIBS}
 )
-if(USE_EGL_IMAGE_DMABUF)
-target_link_libraries(${PLUGIN_NAME}
-  PRIVATE
-    ${GSTREAMER_GL_LIBRARIES}
-)
-endif()
 
 # List of absolute paths to libraries that should be bundled with the plugin
 set(video_player_sailfish_bundled_libraries

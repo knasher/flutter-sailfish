@@ -216,6 +216,11 @@ Works without app code. On `flutter-sfos` 7.sfos14 and later:
   the display's refresh rate (90 Hz on Jolla Phone 2026). Without it the engine
   used its own 60 Hz timer, out of step with the display, and animations
   juddered.
+- **Video frames from the hardware decoder** (7.sfos15 and later) are drawn by
+  the GPU as they are, as external textures: embedder patch 0016 binds
+  EGLImage textures as `GL_TEXTURE_EXTERNAL_OES`, and engine patch
+  `0004-embedder-external-oes-impeller.patch` makes Impeller sample them (it
+  wrapped every embedder texture as 2D). video_player_sailfish uses them.
 
 Frames have about 11 ms at 90 Hz. Effects that are costly on a phone GPU, such
 as `BackdropFilter` blurs or large blurred shadows redrawn on every frame of an
@@ -265,7 +270,7 @@ README).
 | url_launcher | [url_launcher_sailfish](../packages/url_launcher_sailfish) | Opens links in other apps; needs runtime 7.sfos6 (patch 0013) |
 | geolocator | [geolocator_sailfish](../packages/geolocator_sailfish) | From GeoClue; needs the `Location` permission |
 | screen_brightness | [screen_brightness_sailfish](../packages/screen_brightness_sailfish) | Changes the phone's brightness setting, as on iOS, and puts it back |
-| video_player | [video_player_sailfish](../packages/video_player_sailfish) | GStreamer, software decoding; the app's RPM needs GStreamer ([how](../packages/video_player_sailfish/README.md#use)) |
+| video_player | [video_player_sailfish](../packages/video_player_sailfish) | GStreamer, with the hardware decoder from runtime 7.sfos15; the app's RPM needs GStreamer ([how](../packages/video_player_sailfish/README.md#use)) |
 
 ## Sandboxing (Sailjail)
 

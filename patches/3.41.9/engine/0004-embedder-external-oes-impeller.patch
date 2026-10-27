@@ -1,0 +1,32 @@
+Sample embedder OpenGL textures with GL_TEXTURE_EXTERNAL_OES under Impeller.
+
+An embedder hands the engine an external texture (FlutterOpenGLTexture)
+with its GL target. The Skia backend passes the target on, so embedders can
+give it a GL_TEXTURE_EXTERNAL_OES texture, e.g. a hardware video decoder's
+YUV frame bound from an EGLImage, which GPUs only sample through
+samplerExternalOES. Impeller always wrapped the texture as 2D, so such a
+texture came out black or wrong.
+
+Impeller's OpenGL backend already supports external textures
+(TextureType::kTextureExternalOES, used by Android's SurfaceTexture and
+ImageReader textures), so a texture whose target is
+GL_TEXTURE_EXTERNAL_OES is now wrapped as one, set up as Android does.
+2D textures are unchanged.
+
+Not specific to Sailfish OS; a candidate for upstream Flutter.
+
+--- a/engine/src/flutter/shell/platform/embedder/embedder_external_texture_gl.cc
++++ b/engine/src/flutter/shell/platform/embedder/embedder_external_texture_gl.cc
+@@ -157,6 +157,12 @@
+   impeller::TextureDescriptor desc;
+   desc.size = impeller::ISize(texture->width, texture->height);
+   desc.format = impeller::PixelFormat::kR8G8B8A8UNormInt;
++  // An external texture (e.g. a video frame bound from an EGLImage) is
++  // sampled through samplerExternalOES, as on Android.
++  if (texture->target == GL_TEXTURE_EXTERNAL_OES) {
++    desc.type = impeller::TextureType::kTextureExternalOES;
++    desc.storage_mode = impeller::StorageMode::kDevicePrivate;
++  }
+ 
+   impeller::ContextGLES& context =
+       impeller::ContextGLES::Cast(*aiks_context->GetContext());

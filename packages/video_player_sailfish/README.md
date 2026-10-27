@@ -14,8 +14,9 @@ Changes for Sailfish OS:
 
 - Assets are found in `/usr/share/<app>/data/flutter_assets`, where
   Sailfish apps keep their bundle, as well as next to the binary.
-- Software decoding, a time limit on starting and a later start for
-  GStreamer (see [How it plays](#how-it-plays)).
+- Hardware decoding, with frames drawn straight by the GPU, a time limit on
+  starting, a later start for GStreamer and a safer dispose (see
+  [How it plays](#how-it-plays)).
 - Renamed (`VideoPlayerSailfishPlugin`, `VideoPlayerSailfish`), and updated
   to video_player_platform_interface 6.9.
 
@@ -50,17 +51,25 @@ PkgBR:
 
 ## How it plays
 
-GStreamer's `playbin` decodes the video, `videoconvert` turns each frame into
-RGBA, and the frames are copied into a Flutter texture. That works on any
-device but uses the CPU for the conversion and copy, so large videos cost
-battery.
+GStreamer's `playbin` decodes the video. Where Sailfish OS's hardware decoder
+(gst-droid's `droidvdec`) can decode it, its frames, Android graphics
+buffers, go to Flutter as EGLImages and the GPU draws them as they are:
+nothing is converted or copied on the CPU. Anything else (formats the
+hardware doesn't decode, or devices without gst-droid) is decoded in software
+(gstreamer1.0-libav), turned into RGBA by `videoconvert` and copied into a
+Flutter texture, which costs CPU and battery for large videos.
 
-- **Software decoding.** Sailfish OS's hardware decoder (gst-droid) stalled
-  before the first frame with this pipeline, so the plugin turns it off
-  (rank `droidvdec` to none) and GStreamer uses FFmpeg's decoders
-  (gstreamer1.0-libav). An app can still choose with
-  `GST_PLUGIN_FEATURE_RANK`, which the plugin leaves alone if it names
-  `droidvdec`.
+- **Hardware decoding.** Needs runtime 7.sfos15 or later, whose embedder and
+  engine draw these frames (as external textures, with Impeller or Skia). An
+  app can use software decoding instead with
+  `GST_PLUGIN_FEATURE_RANK=droidvdec:NONE` (needed with an older runtime).
+  In `playbin`, gst-droid waited forever before the first frame: decodebin
+  sends the decoder a second, identical `STREAM_START`, and gst-droid then
+  waits for its codec to end a stream it was never given. The plugin drops
+  that repeat. Known issue: an app closed just after showing a hardware video
+  sometimes crashes as its process exits, in the phone's graphics buffer
+  mapper, while the codec's buffers are still being freed (Jolla Phone
+  2026). Nothing shows, and disposing a player while the app runs is fine.
 - **No freezes.** `create` waits at most 5 seconds for the first frame, then
   fails, so `VideoPlayerController.initialize` throws instead of the app
   hanging. Sony's version waited forever on the platform thread.
@@ -73,6 +82,10 @@ battery.
   (`~/.cache/<org>/<app>/gstreamer-1.0`). Only the first video the app ever
   plays loads every plugin; after that GStreamer starts in a few
   milliseconds. An app that sets `GST_REGISTRY` keeps its own.
+- **A safer dispose.** Flutter's raster thread can still ask a disposed
+  player's texture for a frame until the texture is unregistered, so the
+  player's texture and buffers are freed only after that. Sony's version
+  freed them at once.
 
 Changes to Sony's code are listed at the top of this file and in the
 comments where they were made.

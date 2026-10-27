@@ -14,6 +14,8 @@
 #include <flutter/standard_method_codec.h>
 #include <unistd.h>
 
+#include <atomic>
+#include <mutex>
 #include <unordered_map>
 
 #include "gst_video_player.h"
@@ -70,13 +72,17 @@ class VideoPlayerPlugin : public flutter::Plugin {
 
  private:
   struct FlutterVideoPlayer {
-    int64_t texture_id;
+    // -1 until the texture is registered, which is after the video has
+    // started; GStreamer's threads read it.
+    std::atomic<int64_t> texture_id{-1};
     std::unique_ptr<GstVideoPlayer> player;
+    // Held while the texture (raster thread) uses |player|, which
+    // DisposePlayer takes away.
+    std::mutex player_mutex;
     std::unique_ptr<flutter::TextureVariant> texture;
     std::unique_ptr<FlutterDesktopPixelBuffer> buffer;
-#ifdef USE_EGL_IMAGE_DMABUF
-    std::unique_ptr<FlutterDesktopEGLImage> egl_image;
-#endif  // USE_EGL_IMAGE_DMABUF
+    FlutterDesktopEGLImage egl_image = {};
+    void* egl_display = nullptr;
     std::unique_ptr<flutter::EventChannel<flutter::EncodableValue>>
         event_channel;
     std::unique_ptr<flutter::EventSink<flutter::EncodableValue>> event_sink;
@@ -297,37 +303,86 @@ void VideoPlayerPlugin::HandleCreateMethodCall(
   }
 
   auto instance = std::make_unique<FlutterVideoPlayer>();
-#ifdef USE_EGL_IMAGE_DMABUF
-  instance->egl_image = std::make_unique<FlutterDesktopEGLImage>();
-  instance->texture =
-      std::make_unique<flutter::TextureVariant>(flutter::EGLImageTexture(
-          [instance = instance.get()](
-              size_t width, size_t height, void* egl_display,
-              void* egl_context) -> const FlutterDesktopEGLImage* {
-            if (!instance->player) {
-              return nullptr;
-            }
-            instance->egl_image->width = instance->player->GetWidth();
-            instance->egl_image->height = instance->player->GetHeight();
-            instance->egl_image->egl_image =
-                instance->player->GetEGLImage(egl_display, egl_context);
-            return instance->egl_image.get();
-          }));
-#else
-  instance->buffer = std::make_unique<FlutterDesktopPixelBuffer>();
-  instance->texture =
-      std::make_unique<flutter::TextureVariant>(flutter::PixelBufferTexture(
-          [instance = instance.get()](
-              size_t width, size_t height) -> const FlutterDesktopPixelBuffer* {
-            if (!instance->player) {
-              return nullptr;
-            }
-            instance->buffer->width = instance->player->GetWidth();
-            instance->buffer->height = instance->player->GetHeight();
-            instance->buffer->buffer = instance->player->GetFrameBuffer();
-            return instance->buffer.get();
-          }));
-#endif  // USE_EGL_IMAGE_DMABUF
+  {
+    auto player_handler = std::make_unique<VideoPlayerStreamHandlerImpl>(
+        // OnNotifyInitialized
+        [instance = instance.get(), host = this]() {
+          host->SendInitializedEventMessage(instance->texture_id);
+        },
+        // OnNotifyFrameDecoded
+        [instance = instance.get(), host = this]() {
+          const int64_t texture_id = instance->texture_id;
+          if (texture_id >= 0) {
+            host->texture_registrar_->MarkTextureFrameAvailable(texture_id);
+          }
+        },
+        // OnNotifyCompleted
+        [instance = instance.get(), host = this]() {
+          host->SendPlayCompletedEventMessage(instance->texture_id);
+        },
+        [instance = instance.get(), host = this](bool is_playing) {
+          host->SendIsPlayingStateUpdate(instance->texture_id, is_playing);
+        });
+    instance->player =
+        std::make_unique<GstVideoPlayer>(uri, std::move(player_handler));
+  }
+
+  // Sony's version made the texture first. The video starts first here, as
+  // how its frames come (graphics buffers or pixels) decides the texture.
+  if (!instance->player->Init()) {
+    flutter::EncodableMap value;
+    value.emplace(flutter::EncodableValue(kEncodableMapkeyError),
+                  flutter::EncodableValue(
+                      WrapError("Failed to initialize the player for " + uri)));
+    reply(flutter::EncodableValue(value));
+    return;
+  }
+
+  if (instance->player->UsesEGLImages()) {
+    instance->texture =
+        std::make_unique<flutter::TextureVariant>(flutter::EGLImageTexture(
+            [instance = instance.get()](
+                size_t width, size_t height, void* egl_display,
+                void* egl_context) -> const FlutterDesktopEGLImage* {
+              std::lock_guard<std::mutex> lock(instance->player_mutex);
+              if (!instance->player) {
+                return nullptr;
+              }
+              void* image = instance->player->GetEGLImage(egl_display);
+              if (!image) {
+                return nullptr;
+              }
+              instance->egl_display = egl_display;
+              instance->egl_image.egl_image = image;
+              instance->egl_image.width = instance->player->GetWidth();
+              instance->egl_image.height = instance->player->GetHeight();
+              // Called once the image is bound to the embedder's texture.
+              instance->egl_image.release_callback = [](void* context) {
+                auto* instance = static_cast<FlutterVideoPlayer*>(context);
+                GstVideoPlayer::DestroyEGLImage(
+                    instance->egl_display,
+                    const_cast<void*>(instance->egl_image.egl_image));
+              };
+              instance->egl_image.release_context = instance;
+              return &instance->egl_image;
+            }));
+  } else {
+    instance->buffer = std::make_unique<FlutterDesktopPixelBuffer>();
+    instance->texture =
+        std::make_unique<flutter::TextureVariant>(flutter::PixelBufferTexture(
+            [instance = instance.get()](
+                size_t width,
+                size_t height) -> const FlutterDesktopPixelBuffer* {
+              std::lock_guard<std::mutex> lock(instance->player_mutex);
+              if (!instance->player) {
+                return nullptr;
+              }
+              instance->buffer->width = instance->player->GetWidth();
+              instance->buffer->height = instance->player->GetHeight();
+              instance->buffer->buffer = instance->player->GetFrameBuffer();
+              return instance->buffer.get();
+            }));
+  }
   const auto texture_id =
       texture_registrar_->RegisterTexture(instance->texture.get());
   instance->texture_id = texture_id;
@@ -358,42 +413,13 @@ void VideoPlayerPlugin::HandleCreateMethodCall(
     event_channel->SetStreamHandler(std::move(event_channel_handler));
     instance->event_channel = std::move(event_channel);
   }
-  {
-    auto player_handler = std::make_unique<VideoPlayerStreamHandlerImpl>(
-        // OnNotifyInitialized
-        [texture_id, host = this]() {
-          host->SendInitializedEventMessage(texture_id);
-        },
-        // OnNotifyFrameDecoded
-        [texture_id, host = this]() {
-          host->texture_registrar_->MarkTextureFrameAvailable(texture_id);
-        },
-        // OnNotifyCompleted
-        [texture_id, host = this]() {
-          host->SendPlayCompletedEventMessage(texture_id);
-        },
-        [texture_id, host = this](bool is_playing) {
-          host->SendIsPlayingStateUpdate(texture_id, is_playing);
-        });
-    instance->player =
-        std::make_unique<GstVideoPlayer>(uri, std::move(player_handler));
-    players_[texture_id] = std::move(instance);
-  }
+  players_[texture_id] = std::move(instance);
 
   flutter::EncodableMap value;
   TextureMessage result;
-
-  bool ok = players_[texture_id]->player->Init();
-  if (ok) {
-    result.SetTextureId(texture_id);
-    value.emplace(flutter::EncodableValue(kEncodableMapkeyResult),
-                  result.ToMap());
-  } else {
-    auto error_message = "Failed to initialize the player with texture id: " +
-                         std::to_string(texture_id);
-    value.emplace(flutter::EncodableValue(kEncodableMapkeyError),
-                  flutter::EncodableValue(WrapError(error_message)));
-  }
+  result.SetTextureId(texture_id);
+  value.emplace(flutter::EncodableValue(kEncodableMapkeyResult),
+                result.ToMap());
   reply(flutter::EncodableValue(value));
 }
 
@@ -627,17 +653,27 @@ void VideoPlayerPlugin::SendIsPlayingStateUpdate(int64_t texture_id,
 }
 
 void VideoPlayerPlugin::DisposePlayer(int64_t texture_id) {
-  if (players_.find(texture_id) != players_.end()) {
-    texture_registrar_->UnregisterTexture(texture_id);
-    auto* player = players_[texture_id].get();
-    player->event_sink = nullptr;
-    if (player->event_channel) {
-      player->event_channel->SetStreamHandler(nullptr);
-    }
-    player->player = nullptr;
-    player->buffer = nullptr;
-    player->texture = nullptr;
+  auto it = players_.find(texture_id);
+  if (it == players_.end() || !it->second) {
+    return;
   }
+  // The raster thread may still ask the texture for a frame until it is
+  // unregistered, so the rest of the instance is freed only after that.
+  // (Sony's version freed it at once.)
+  FlutterVideoPlayer* instance = it->second.release();
+  instance->event_sink = nullptr;
+  if (instance->event_channel) {
+    instance->event_channel->SetStreamHandler(nullptr);
+  }
+  std::unique_ptr<GstVideoPlayer> player;
+  {
+    std::lock_guard<std::mutex> lock(instance->player_mutex);
+    player = std::move(instance->player);
+  }
+  // Stops the video here, on the platform thread.
+  player = nullptr;
+  texture_registrar_->UnregisterTexture(texture_id,
+                                        [instance]() { delete instance; });
 }
 
 flutter::EncodableValue VideoPlayerPlugin::WrapError(

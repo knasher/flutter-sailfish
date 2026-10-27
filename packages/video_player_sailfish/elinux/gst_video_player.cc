@@ -4,6 +4,8 @@
 
 #include "gst_video_player.h"
 
+#include <dlfcn.h>
+
 #include <cstring>
 #include <iostream>
 
@@ -12,23 +14,105 @@ namespace {
 // so a decoder that never produces one must not freeze the app.
 constexpr GstClockTime kPrerollTimeout = 5 * GST_SECOND;
 
-// Sailfish OS's hardware video decoder (gst-droid) stalled before the first
-// frame with this pipeline (Jolla Phone 2026), so the software decoders are
-// used instead, unless the app sets the ranks itself in
-// GST_PLUGIN_FEATURE_RANK.
-void UseSoftwareDecoders() {
-  const char* ranks = g_getenv("GST_PLUGIN_FEATURE_RANK");
-  for (const char* name : {"droidvdec"}) {
-    if (ranks && strstr(ranks, name)) {
-      continue;
-    }
-    GstPluginFeature* feature =
-        gst_registry_lookup_feature(gst_registry_get(), name);
-    if (feature) {
-      gst_plugin_feature_set_rank(feature, GST_RANK_NONE);
-      gst_object_unref(feature);
-    }
+// Frames from Sailfish OS's hardware video decoder (gst-droid's droidvdec):
+// Android graphics buffers, which only the GPU can read.
+constexpr char kDroidQueueBuffer[] = "memory:DroidMediaQueueBuffer";
+
+// gst-droid makes EGLImages of its frames through the Nemo GStreamer
+// interfaces library, which it loads; EGL is loaded by the embedder. Both are
+// looked up at run time, so apps need no extra headers to build.
+using CreateEGLImage = void* (*)(GstMemory* mem, void* egl_display,
+                                 void* egl_context);
+using DestroyEGLImageKHR = unsigned int (*)(void* egl_display,
+                                            void* egl_image);
+
+CreateEGLImage CreateEGLImageFunction() {
+  static CreateEGLImage function = [] {
+    void* library = dlopen("libgstnemointerfaces-1.0.so.0", RTLD_NOW);
+    return library ? reinterpret_cast<CreateEGLImage>(dlsym(
+                         library, "nemo_gst_egl_image_memory_create_image"))
+                   : nullptr;
+  }();
+  return function;
+}
+
+DestroyEGLImageKHR DestroyEGLImageFunction() {
+  static DestroyEGLImageKHR function = [] {
+    using GetProcAddress = void* (*)(const char* name);
+    void* library = dlopen("libEGL.so.1", RTLD_NOW);
+    auto get_proc_address =
+        library ? reinterpret_cast<GetProcAddress>(
+                      dlsym(library, "eglGetProcAddress"))
+                : nullptr;
+    return get_proc_address ? reinterpret_cast<DestroyEGLImageKHR>(
+                                  get_proc_address("eglDestroyImageKHR"))
+                            : nullptr;
+  }();
+  return function;
+}
+
+// Whether the hardware decoder can be used: it is installed and not ranked
+// out (an app can still turn it off with
+// GST_PLUGIN_FEATURE_RANK=droidvdec:NONE), and its frames can be shown.
+bool HardwareDecoding() {
+  GstPluginFeature* feature =
+      gst_registry_lookup_feature(gst_registry_get(), "droidvdec");
+  if (!feature) {
+    return false;
   }
+  const bool ranked = gst_plugin_feature_get_rank(feature) > GST_RANK_NONE;
+  gst_object_unref(feature);
+  return ranked && CreateEGLImageFunction() && DestroyEGLImageFunction();
+}
+
+// Whether droidvdec has had data since its last STREAM_START.
+struct StreamStartGuard {
+  bool started = false;
+  bool data = false;
+};
+
+// playbin's decodebin sends droidvdec a second, identical STREAM_START after
+// its caps. GStreamer's decoders drain on each one, and gst-droid then waits,
+// with no time limit, for its codec to end a stream it was never given. The
+// codec on Jolla Phone 2026 never does, so the first frame never came. With
+// no data in between, the repeat has nothing to drain, so it is dropped.
+GstPadProbeReturn GuardStreamStart(GstPad* pad, GstPadProbeInfo* info,
+                                   gpointer user_data) {
+  auto* guard = static_cast<StreamStartGuard*>(user_data);
+  if (!(info->type & GST_PAD_PROBE_TYPE_EVENT_DOWNSTREAM)) {
+    guard->data = true;
+    return GST_PAD_PROBE_OK;
+  }
+  if (GST_EVENT_TYPE(GST_PAD_PROBE_INFO_EVENT(info)) !=
+      GST_EVENT_STREAM_START) {
+    return GST_PAD_PROBE_OK;
+  }
+  if (guard->started && !guard->data) {
+    return GST_PAD_PROBE_DROP;
+  }
+  guard->started = true;
+  guard->data = false;
+  return GST_PAD_PROBE_OK;
+}
+
+void OnElementAdded(GstBin* bin, GstBin* sub_bin, GstElement* element,
+                    gpointer user_data) {
+  GstElementFactory* factory = gst_element_get_factory(element);
+  if (!factory || strcmp(GST_OBJECT_NAME(factory), "droidvdec") != 0) {
+    return;
+  }
+  GstPad* pad = gst_element_get_static_pad(element, "sink");
+  if (!pad) {
+    return;
+  }
+  gst_pad_add_probe(
+      pad,
+      static_cast<GstPadProbeType>(GST_PAD_PROBE_TYPE_EVENT_DOWNSTREAM |
+                                   GST_PAD_PROBE_TYPE_BUFFER |
+                                   GST_PAD_PROBE_TYPE_BUFFER_LIST),
+      GuardStreamStart, new StreamStartGuard(),
+      [](gpointer guard) { delete static_cast<StreamStartGuard*>(guard); });
+  gst_object_unref(pad);
 }
 
 // The app's cache folder: ~/.cache/<OrganizationName>/<ApplicationName> from
@@ -102,9 +186,6 @@ GstVideoPlayer::GstVideoPlayer(
 }
 
 GstVideoPlayer::~GstVideoPlayer() {
-#ifdef USE_EGL_IMAGE_DMABUF
-  UnrefEGLImage();
-#endif  // USE_EGL_IMAGE_DMABUF
   Stop();
   DestroyPipeline();
 }
@@ -118,7 +199,6 @@ void GstVideoPlayer::GstLibraryLoad() {
   }
   UseAppRegistry();
   gst_init(NULL, NULL);
-  UseSoftwareDecoders();
 }
 
 // static
@@ -141,7 +221,9 @@ bool GstVideoPlayer::Init() {
 
   // Sets internal video size and buffier.
   GetVideoSize(width_, height_);
-  pixels_.reset(new uint32_t[width_ * height_]);
+  if (!uses_egl_images_) {
+    pixels_.reset(new uint32_t[width_ * height_]);
+  }
 
   stream_handler_->OnNotifyInitialized();
 
@@ -232,6 +314,7 @@ bool GstVideoPlayer::SetSeek(int64_t position) {
     std::cerr << "Failed to seek " << nanosecond << std::endl;
     return false;
   }
+  last_position_ = position;
   return true;
 }
 
@@ -249,10 +332,12 @@ int64_t GstVideoPlayer::GetDuration() {
 int64_t GstVideoPlayer::GetCurrentPosition() {
   gint64 position = 0;
 
-  // Sometimes we get an error when playing streaming videos.
-  if (!gst_element_query_position(gst_.pipeline, GST_FORMAT_TIME, &position)) {
-    std::cerr << "Failed to get current position" << std::endl;
-    return -1;
+  // GStreamer has no position while a seek flushes the pipeline (the
+  // hardware decoder restarts its codec then), and sometimes when playing
+  // streaming videos. Sony's version failed the app's call; this reports the
+  // last position, or where the seek goes, as Android does.
+  if (gst_element_query_position(gst_.pipeline, GST_FORMAT_TIME, &position)) {
+    last_position_ = position / GST_MSECOND;
   }
 
   // TODO: We need to handle this code in the proper plase.
@@ -274,47 +359,32 @@ int64_t GstVideoPlayer::GetCurrentPosition() {
     }
   }
 
-  return position / GST_MSECOND;
+  return last_position_;
 }
 
-#ifdef USE_EGL_IMAGE_DMABUF
-void* GstVideoPlayer::GetEGLImage(void* egl_display, void* egl_context) {
-  std::shared_lock<std::shared_mutex> lock(mutex_buffer_);
-  if (!gst_.buffer) {
+// Sony's version could show dmabuf frames through GStreamer's GL library;
+// Sailfish OS's hardware decoder gives Android graphics buffers instead.
+void* GstVideoPlayer::GetEGLImage(void* egl_display) {
+  std::lock_guard<std::shared_mutex> lock(mutex_buffer_);
+  if (!gst_.buffer || gst_buffer_n_memory(gst_.buffer) == 0) {
     return nullptr;
   }
-
-  GstMemory* memory = gst_buffer_peek_memory(gst_.buffer, 0);
-  if (gst_is_dmabuf_memory(memory)) {
-    UnrefEGLImage();
-
-    gint fd = gst_dmabuf_memory_get_fd(memory);
-    gst_gl_display_egl_ =
-        gst_gl_display_egl_new_with_egl_display(reinterpret_cast<gpointer>(egl_display));
-    gst_gl_ctx_ = gst_gl_context_new_wrapped(
-        GST_GL_DISPLAY_CAST(gst_gl_display_egl_), reinterpret_cast<guintptr>(egl_context),
-        GST_GL_PLATFORM_EGL, GST_GL_API_GLES2);
-
-    gst_gl_context_activate(gst_gl_ctx_, TRUE);
-
-    gst_egl_image_ =
-        gst_egl_image_from_dmabuf(gst_gl_ctx_, fd, &gst_video_info_, 0, 0);
-    return reinterpret_cast<void*>(gst_egl_image_get_image(gst_egl_image_));
+  // EGL_NO_CONTEXT, as EGL_ANDROID_image_native_buffer requires.
+  void* image = CreateEGLImageFunction()(gst_buffer_peek_memory(gst_.buffer, 0),
+                                         egl_display, nullptr);
+  if (!image) {
+    return nullptr;
   }
-  return nullptr;
+  // Keep this frame from the decoder until the texture shows the next one;
+  // the previous one goes back.
+  gst_buffer_replace(&shown_buffer_, gst_.buffer);
+  return image;
 }
 
-void GstVideoPlayer::UnrefEGLImage() {
-  if (gst_egl_image_) {
-    gst_egl_image_unref(gst_egl_image_);
-    gst_object_unref(gst_gl_ctx_);
-    gst_object_unref(gst_gl_display_egl_);
-    gst_egl_image_ = NULL;
-    gst_gl_ctx_ = NULL;
-    gst_gl_display_egl_ = NULL;
-  }
+// static
+void GstVideoPlayer::DestroyEGLImage(void* egl_display, void* egl_image) {
+  DestroyEGLImageFunction()(egl_display, egl_image);
 }
-#endif  // USE_EGL_IMAGE_DMABUF
 
 const uint8_t* GstVideoPlayer::GetFrameBuffer() {
   std::shared_lock<std::shared_mutex> lock(mutex_buffer_);
@@ -364,15 +434,22 @@ bool GstVideoPlayer::CreatePipeline() {
   gst_bus_set_sync_handler(gst_.bus, HandleGstMessage, this, NULL);
 
   // Sets properties to fakesink to get the callback of a decoded frame.
-  g_object_set(G_OBJECT(gst_.video_sink), "sync", TRUE, "qos", FALSE, NULL);
+  // It keeps no frame of its own: the hardware decoder has only a few.
+  g_object_set(G_OBJECT(gst_.video_sink), "sync", TRUE, "qos", FALSE,
+               "enable-last-sample", FALSE, NULL);
   g_object_set(G_OBJECT(gst_.video_sink), "signal-handoffs", TRUE, NULL);
   g_signal_connect(G_OBJECT(gst_.video_sink), "handoff",
                    G_CALLBACK(HandoffHandler), this);
   gst_bin_add_many(GST_BIN(gst_.output), gst_.video_convert, gst_.video_sink,
                    NULL);
 
-  // Adds caps to the converter to convert the color format to RGBA.
-  auto* caps = gst_caps_from_string("video/x-raw,format=RGBA");
+  // Takes the hardware decoder's frames as they are (videoconvert passes
+  // them through), and converts anything else to RGBA.
+  std::string formats = "video/x-raw,format=RGBA";
+  if (HardwareDecoding()) {
+    formats = std::string("video/x-raw(") + kDroidQueueBuffer + "); " + formats;
+  }
+  auto* caps = gst_caps_from_string(formats.c_str());
   auto link_ok =
       gst_element_link_filtered(gst_.video_convert, gst_.video_sink, caps);
   gst_caps_unref(caps);
@@ -390,6 +467,8 @@ bool GstVideoPlayer::CreatePipeline() {
   // Sets properties to playbin.
   g_object_set(gst_.playbin, "uri", uri_.c_str(), NULL);
   g_object_set(gst_.playbin, "video-sink", gst_.output, NULL);
+  g_signal_connect(gst_.playbin, "deep-element-added",
+                   G_CALLBACK(OnElementAdded), NULL);
   gst_bin_add_many(GST_BIN(gst_.pipeline), gst_.playbin, NULL);
 
   return true;
@@ -436,6 +515,7 @@ void GstVideoPlayer::DestroyPipeline() {
     gst_buffer_unref(gst_.buffer);
     gst_.buffer = nullptr;
   }
+  gst_buffer_replace(&shown_buffer_, nullptr);
 
   if (gst_.bus) {
     gst_object_unref(gst_.bus);
@@ -511,15 +591,9 @@ void GstVideoPlayer::GetVideoSize(int32_t& width, int32_t& height) {
   gst_structure_get_int(structure, "width", &width);
   gst_structure_get_int(structure, "height", &height);
 
-#ifdef USE_EGL_IMAGE_DMABUF
-  gboolean res = gst_video_info_from_caps(&gst_video_info_, caps);
-  if (!res) {
-    std::cerr << "Failed to get a gst_video_info" << std::endl;
-    gst_caps_unref(caps);
-    gst_object_unref(sink_pad);
-    return;
-  }
-#endif  // USE_EGL_IMAGE_DMABUF
+  GstCapsFeatures* features = gst_caps_get_features(caps, 0);
+  uses_egl_images_ =
+      features && gst_caps_features_contains(features, kDroidQueueBuffer);
 
   gst_caps_unref(caps);
   gst_object_unref(sink_pad);
@@ -540,7 +614,9 @@ void GstVideoPlayer::HandoffHandler(GstElement* fakesink, GstBuffer* buf,
   if (width != self->width_ || height != self->height_) {
     self->width_ = width;
     self->height_ = height;
-    self->pixels_.reset(new uint32_t[width * height]);
+    if (!self->uses_egl_images_) {
+      self->pixels_.reset(new uint32_t[width * height]);
+    }
     std::cout << "Pixel buffer size: width = " << width
               << ", height = " << height << std::endl;
   }
