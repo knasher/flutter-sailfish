@@ -8,7 +8,10 @@ Without it, `flutter_secure_storage` doesn't work on Sailfish OS: its Linux
 version is native code built on libsecret (GNOME Keyring), which Sailfish
 doesn't have.
 
-Add it next to `flutter_secure_storage`; it registers itself:
+The flutter-sailfish build adds it to apps that use
+`flutter_secure_storage`, so there's nothing to add (runtime 7.sfos8 and
+later). To use another copy, or with an older runtime, list it next to
+`flutter_secure_storage`; the build then uses yours:
 
 ```yaml
 dependencies:

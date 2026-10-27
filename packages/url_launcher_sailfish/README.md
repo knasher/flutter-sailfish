@@ -8,7 +8,10 @@ Without it, Sailfish apps use `url_launcher_linux`, whose native GTK code
 isn't built for Sailfish OS, so links didn't open. Sailjail's sandbox has no
 `xdg-open` either.
 
-Add it next to `url_launcher`; it registers itself:
+The flutter-sailfish build adds it to apps that use `url_launcher`, so
+there's nothing to add (runtime 7.sfos8 and later). To use another copy, or
+with an older runtime, list it next to `url_launcher`; the build then uses
+yours:
 
 ```yaml
 dependencies:

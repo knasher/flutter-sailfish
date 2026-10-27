@@ -66,6 +66,7 @@ test -f bin/gen_snapshot
 test -f sdk/bin/flutter
 test -d "$src"
 test -f flutter-elinux/bin/flutter_elinux.dart
+test -d packages
 # sfosbuild copyTree writes 0644; restore execute bits for the devel toolchain.
 chmod +x bin/gen_snapshot flutter-sfos-aot flutter-elinux/bin/flutter-elinux
 find sdk/bin -type f -exec chmod a+x {} +
@@ -117,8 +118,9 @@ cmakedir=%{_libdir}/cmake/flutter-sfos-%{version}
 wrapdir=%{_datadir}/flutter-sfos/%{version}/cpp_client_wrapper
 sdkdir=%{_datadir}/flutter-sfos/%{version}/sdk
 elindir=%{_datadir}/flutter-sfos/%{version}/flutter-elinux
+pkgdir=%{_datadir}/flutter-sfos/%{version}/packages
 
-mkdir -p %{buildroot}"$libdir" %{buildroot}"$incdir" %{buildroot}"$execdir" %{buildroot}"$cmakedir" %{buildroot}"$wrapdir" %{buildroot}"$sdkdir" %{buildroot}"$elindir"
+mkdir -p %{buildroot}"$libdir" %{buildroot}"$incdir" %{buildroot}"$execdir" %{buildroot}"$cmakedir" %{buildroot}"$wrapdir" %{buildroot}"$sdkdir" %{buildroot}"$elindir" %{buildroot}"$pkgdir"
 
 install -m 755 build-client/flutter-client %{buildroot}"$execdir"/flutter-client
 install -m 755 build-so/libflutter_elinux_wayland.so %{buildroot}"$libdir"/libflutter_elinux_wayland.so
@@ -158,6 +160,8 @@ cp -a flutter-elinux/. %{buildroot}"$elindir"/
 rm -rf %{buildroot}"$elindir"/flutter
 ln -sfn ../sdk %{buildroot}"$elindir"/flutter
 chmod +x %{buildroot}"$elindir"/bin/flutter-elinux
+# Sailfish versions of plugins; flutter-sfos-aot adds them to apps.
+cp -a packages/. %{buildroot}"$pkgdir"/
 
 sed -e "s|@VERSION@|%{version}|g" \
 	-e "s|@LIBDIR@|$libdir|g" \
@@ -190,5 +194,6 @@ sed -e "s|@VERSION@|%{version}|g" \
 %{_datadir}/flutter-sfos/%{version}/cpp_client_wrapper
 %{_datadir}/flutter-sfos/%{version}/sdk/
 %{_datadir}/flutter-sfos/%{version}/flutter-elinux/
+%{_datadir}/flutter-sfos/%{version}/packages/
 %{_libexecdir}/flutter-sfos/%{version}/gen_snapshot
 %{_libexecdir}/flutter-sfos/%{version}/flutter-sfos-aot

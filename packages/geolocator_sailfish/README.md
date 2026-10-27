@@ -8,7 +8,9 @@ Without it, Sailfish apps use `geolocator_linux`, which asks GeoClue 2.
 Sailfish OS has the older GeoClue (0.12) instead, with Jolla's GPS and
 cell-based providers, so it failed.
 
-Add it next to `geolocator`; it registers itself:
+The flutter-sailfish build adds it to apps that use `geolocator`, so there's
+nothing to add (runtime 7.sfos8 and later). To use another copy, or with an
+older runtime, list it next to `geolocator`; the build then uses yours:
 
 ```yaml
 dependencies:

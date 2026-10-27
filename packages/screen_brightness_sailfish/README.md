@@ -7,7 +7,10 @@ Not published on pub.dev yet.
 screen_brightness has no Linux version, so without this its calls fail on
 Sailfish OS.
 
-Add it next to `screen_brightness`; it registers itself:
+The flutter-sailfish build adds it to apps that use `screen_brightness`, so
+there's nothing to add (runtime 7.sfos8 and later). To use another copy, or
+with an older runtime, list it next to `screen_brightness`; the build then
+uses yours:
 
 ```yaml
 dependencies:

@@ -57,6 +57,16 @@ runtime: engine embedder
 	$(stamp) template/runtime/flutter-sfos-aot.sh.in > $(RUNTIME)/flutter-sfos-aot
 	chmod +x $(RUNTIME)/flutter-sfos-aot
 	cp -f template/runtime/cmake/flutter-sfos-config.cmake.in $(RUNTIME)/cmake/
+# The packages that implement a plugin, for flutter-sfos-aot to add to the
+# apps that use it. Side by side, as some depend on others by relative path.
+	rm -rf $(RUNTIME)/packages
+	mkdir -p $(RUNTIME)/packages
+	for p in $$(grep -l '^ *implements:' packages/*/pubspec.yaml); do \
+		d=$${p%/pubspec.yaml}; \
+		cp -R $$d $(RUNTIME)/packages/; \
+		rm -rf $(RUNTIME)/packages/$${d##*/}/.dart_tool $(RUNTIME)/packages/$${d##*/}/build \
+			$(RUNTIME)/packages/$${d##*/}/pubspec.lock; \
+	done
 # The spec builds out of tree in build-client/ and build-so/. Their Makefiles
 # are generated inside the build container and call its cmake, so remove them
 # instead of running make clean on the host.

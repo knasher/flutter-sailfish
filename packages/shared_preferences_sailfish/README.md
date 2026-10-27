@@ -8,7 +8,10 @@ in a folder named after the binary. Sailjail doesn't keep that folder for apps
 that declare their own names, so preferences would be lost when the app
 closes.
 
-Add it next to `shared_preferences`; it registers itself:
+The flutter-sailfish build adds it to apps that use `shared_preferences`, so
+there's nothing to add (runtime 7.sfos8 and later). To use another copy, or
+with an older runtime, list it next to `shared_preferences`; the build then
+uses yours:
 
 ```yaml
 dependencies:

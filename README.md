@@ -79,6 +79,7 @@ patches/<ver>/                      # embedder diffs; symlink to a previous ver 
 patches/<ver>/flutter-elinux/       # flutter-elinux (build tool) diffs
 patches/<ver>/engine/               # Flutter engine diffs (make engine applies them)
 engine/                             # Dockerfile (linux/arm64)
+packages/                           # flutter_sailfish + Sailfish versions of plugins (-devel ships these; builds add them)
 examples/hello/                     # sample app; `./elinux/build.sh` → sfosbuild .
 template/elinux/                    # copy into an app as elinux/
 template/rpm/                       # copy into the app as rpm/

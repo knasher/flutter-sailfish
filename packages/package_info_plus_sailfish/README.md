@@ -9,7 +9,10 @@ for the app's version next to its binary. Sailfish apps keep the binary in
 `/usr/bin` and everything else in `/usr/share/<app>`, so the version came
 back empty.
 
-Add it next to `package_info_plus`; it registers itself:
+The flutter-sailfish build adds it to apps that use `package_info_plus`, so
+there's nothing to add (runtime 7.sfos8 and later). To use another copy, or
+with an older runtime, list it next to `package_info_plus`; the build then
+uses yours:
 
 ```yaml
 dependencies:

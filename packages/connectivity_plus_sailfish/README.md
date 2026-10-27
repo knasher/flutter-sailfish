@@ -7,7 +7,10 @@ Not published on pub.dev yet.
 Without it, Sailfish apps use connectivity_plus's Linux version, which asks
 NetworkManager. Sailfish OS uses ConnMan instead, so it failed.
 
-Add it next to `connectivity_plus`; it registers itself:
+The flutter-sailfish build adds it to apps that use `connectivity_plus`, so
+there's nothing to add (runtime 7.sfos8 and later). To use another copy, or
+with an older runtime, list it next to `connectivity_plus`; the build then
+uses yours:
 
 ```yaml
 dependencies:

@@ -8,7 +8,10 @@ Sailfish: it looks up the user's Documents folder with a program the sandbox
 doesn't have, and its other folders, named after the binary, aren't kept by
 Sailjail for apps that declare their own names.
 
-Add it next to `path_provider`; it registers itself:
+The flutter-sailfish build adds it to apps that use `path_provider`, so
+there's nothing to add (runtime 7.sfos8 and later). To use another copy, or
+with an older runtime, list it next to `path_provider`; the build then uses
+yours:
 
 ```yaml
 dependencies:

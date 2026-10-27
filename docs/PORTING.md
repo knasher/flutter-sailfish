@@ -22,9 +22,10 @@ cd your_app
 No host Flutter SDK is required. ExtraInstall runs stock
 `flutter-elinux build elinux --release --target-arch=arm64 --target-backend-type=wayland`
 in the aarch64 Sailfish image (plugins and native `.so` included). The
-only Sailfish-specific step is overlaying our engine/embedder `.so` in
-the flutter-elinux cache, then dropping those `.so` from the app RPM so
-the device uses `flutter-sfos-<ver>`.
+Sailfish-specific steps: it builds from a copy of the app with the Sailfish
+versions of its plugins added (see [Plugins](#plugins)), overlays our
+engine/embedder `.so` in the flutter-elinux cache, then drops those `.so`
+from the app RPM so the device uses `flutter-sfos-<ver>`.
 
 `elinux/CMakeLists.txt` and `elinux/flutter/CMakeLists.txt` are stock
 flutter-elinux templates (`ephemeral/`). Do not point them at
@@ -217,7 +218,18 @@ flutter-elinux builds them with the Linux plugin registrant. So:
 Sailfish versions of standard plugins are separate packages in
 [packages/](../packages), one per plugin. They are `elinux` Dart plugins:
 flutter-elinux registers them after the Linux ones, in Sailfish builds only.
-Add the ones you use next to the plugin itself:
+
+You don't add them. As Flutter does for iOS and Android, the build adds the
+Sailfish version of each plugin the app uses, directly or through another
+package (not one only used in tests). The packages come with the runtime's
+`-devel` RPM (7.sfos8 and later), and the build log names the ones it adds
+(`flutter-sfos-aot: adding …`). It builds from a copy of the app, so
+`pubspec.yaml` and `pubspec.lock` don't change.
+
+To use another copy of one, list it in `pubspec.yaml` and the build leaves it
+alone, or put it in `dependency_overrides` and the build adds it with your
+override. With an older runtime, list the ones you need (see each package's
+README).
 
 | Plugin | Sailfish package | Notes |
 |---|---|---|

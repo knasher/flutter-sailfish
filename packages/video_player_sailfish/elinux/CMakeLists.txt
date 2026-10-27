@@ -8,7 +8,16 @@ set(PLUGIN_NAME "video_player_sailfish_plugin")
 
 find_package(PkgConfig)
 pkg_check_modules(GLIB REQUIRED glib-2.0)
-pkg_check_modules(GSTREAMER REQUIRED gstreamer-1.0)
+# The build adds this package to apps that use video_player, so say what
+# the app's RPM needs rather than only that GStreamer is missing.
+pkg_check_modules(GSTREAMER gstreamer-1.0)
+if(NOT GSTREAMER_FOUND)
+  message(FATAL_ERROR
+    "video_player on Sailfish OS plays videos with GStreamer. In the app's "
+    "rpm/<app>.yaml, add pkgconfig(gstreamer-1.0) to PkgBR, and "
+    "gstreamer1.0-plugins-base, gstreamer1.0-plugins-good and "
+    "gstreamer1.0-libav to Requires (see video_player_sailfish's README).")
+endif()
 if(USE_EGL_IMAGE_DMABUF)
 pkg_check_modules(GSTREAMER_GL REQUIRED gstreamer-gl-1.0)
 endif()

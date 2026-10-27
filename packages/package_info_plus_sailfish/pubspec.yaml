@@ -11,7 +11,8 @@ environment:
 dependencies:
   flutter:
     sdk: flutter
-  package_info_plus_platform_interface: ^3.2.1
+  # 4.x changed nothing apps or implementations use (a Windows dependency).
+  package_info_plus_platform_interface: ">=3.2.1 <5.0.0"
 
 dev_dependencies:
   flutter_test:

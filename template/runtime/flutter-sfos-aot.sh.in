@@ -11,6 +11,8 @@ ELINUX=/usr/share/flutter-sfos/$VER/flutter-elinux
 SNAP=/usr/libexec/flutter-sfos/$VER/gen_snapshot
 DART=$SDK/bin/cache/dart-sdk/bin/dart
 SNAPSHOT=$ELINUX/bin/cache/flutter-elinux.snapshot
+# Sailfish versions of plugins (geolocator_sailfish and so on).
+PACKAGES=/usr/share/flutter-sfos/$VER/packages
 
 LIB=/usr/lib64/flutter-sfos/$VER
 if [ ! -f "$LIB/libflutter_engine.so" ]; then
@@ -23,6 +25,7 @@ test -x "$SDK/bin/flutter"
 test -x "$SNAP"
 test -x "$DART"
 test -d "$ELINUX"
+test -d "$PACKAGES"
 test -f "$LIB/libflutter_engine.so"
 test -f "$LIB/libflutter_elinux_wayland.so"
 test -f "$APP/pubspec.yaml"
@@ -76,13 +79,25 @@ if [ ! -d "$SDK/bin/cache/artifacts/engine/elinux-common" ] || \
 	exit 1
 fi
 
+# Built from a copy, so adding the Sailfish packages below leaves the app's
+# own files alone. Build output, git and RPMs aren't needed.
+WORK=$(mktemp -d "${TMPDIR:-/tmp}/flutter-sfos-aot.XXXXXX")
+for f in "$APP"/* "$APP"/.[!.]*; do
+	case ${f##*/} in
+	build | .dart_tool | .git | rpms | *.rpm) continue ;;
+	esac
+	if [ -e "$f" ] || [ -L "$f" ]; then
+		cp -a "$f" "$WORK"/
+	fi
+done
+
 # NativeBundle runs `nproc` with no fallback.
 if ! command -v nproc >/dev/null 2>&1; then
-	mkdir -p "$APP/.dart_tool/bin"
+	mkdir -p "$WORK/.dart_tool/bin"
 	printf '%s\n' '#!/bin/sh' 'exec getconf _NPROCESSORS_ONLN' \
-		>"$APP/.dart_tool/bin/nproc"
-	chmod +x "$APP/.dart_tool/bin/nproc"
-	export PATH="$APP/.dart_tool/bin:$PATH"
+		>"$WORK/.dart_tool/bin/nproc"
+	chmod +x "$WORK/.dart_tool/bin/nproc"
+	export PATH="$WORK/.dart_tool/bin:$PATH"
 fi
 
 # Drive flutter-elinux via its snapshot. The bash wrapper's update_flutter
@@ -105,9 +120,37 @@ elinux() {
 		"$SNAPSHOT" "$@"
 }
 
-cd "$APP"
+cd "$WORK"
 elinux clean
 elinux pub get
+
+# Each Sailfish package whose plugin the app uses (directly or through
+# another package, but not only for tests) is added, as Flutter adds the iOS
+# and Android versions. One the app lists itself is left alone. One that's
+# only in its dependency_overrides is added too, and the override decides
+# which copy is used.
+deps=$(elinux pub deps --style=list --no-dev)
+uses=$(printf '%s\n' "$deps" |
+	sed '/^dependency overrides:$/,/^[a-z].*:$/d' |
+	sed -n 's/^- \([^ ]*\) .*/\1/p')
+names=
+set --
+for pubspec in "$PACKAGES"/*/pubspec.yaml; do
+	[ -f "$pubspec" ] || continue
+	dir=${pubspec%/pubspec.yaml}
+	name=${dir##*/}
+	plugin=$(sed -n 's/^ *implements: *\([a-z0-9_]*\).*/\1/p' "$pubspec")
+	if [ -n "$plugin" ] &&
+		printf '%s\n' "$uses" | grep -qx "$plugin" &&
+		! printf '%s\n' "$uses" | grep -qx "$name"; then
+		names="$names $name"
+		set -- "$@" "$name:{\"path\":\"$dir\"}"
+	fi
+done
+if [ $# -gt 0 ]; then
+	echo "flutter-sfos-aot: adding$names"
+	elinux pub add "$@"
+fi
 
 # Overlay after pub get so a cache refresh cannot replace our .so.
 # flutter-elinux copies these into ephemeral/ and links.
@@ -127,7 +170,7 @@ find "$cache" -type f -name gen_snapshot -exec chmod +x {} \;
 
 elinux build elinux --release --target-arch=arm64 --target-backend-type=wayland
 
-src=$APP/build/elinux/arm64/release/bundle
+src=$WORK/build/elinux/arm64/release/bundle
 if [ ! -d "$src" ]; then
 	echo "flutter-sfos-aot: missing $src" >&2
 	exit 1
@@ -139,4 +182,5 @@ cp -a "$src"/. "$BUNDLE"/
 # Device runtime is flutter-sfos-<ver>; do not ship Sony/our copies in the app.
 rm -f "$BUNDLE/lib/libflutter_engine.so" "$BUNDLE/lib/libflutter_elinux_"*.so
 test -f "$BUNDLE/lib/libapp.so"
+rm -rf "$WORK"
 echo "elinux $APP -> $BUNDLE"
