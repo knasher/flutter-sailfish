@@ -99,7 +99,10 @@ cut-out as `MediaQuery.padding` (view padding), as Android and iOS do, so
 it, and `SafeArea` and scroll views keep clear of it, in every orientation.
 This needs a Flutter engine with `patches/<ver>/engine/0001-view-padding.patch`
 (the embedder API had no view padding) and embedder patch 0014; the runtime
-build checks the engine and only reports padding when it can.
+build checks the engine and only reports padding when it can. The patch adds
+the `physical_padding` field proposed upstream for moving Android to the
+embedder API ([flutter/rfc#24](https://github.com/flutter/rfc/pull/24)), so
+it can go once Flutter ships that.
 
 On older runtimes (patch 0009 only), use the package's builder wherever the
 app creates its `MaterialApp` (in `MyApp.build` for a project made with

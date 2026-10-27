@@ -2,7 +2,7 @@ Report the display cut-outs as view padding (needs 0009).
 
 0009 sends the cut-out padding on flutter-sfos/display_cutouts, and apps had to add it to MediaQuery themselves (flutter_sailfish's SailfishCutouts.builder), because the embedder API had no view padding. With the engine's view padding patch (patches/<ver>/engine/0001-view-padding.patch), the padding goes in the window metrics instead, so MediaQuery.padding, SafeArea and app bars avoid the cut-out in every app.
 
-The embedder's FlutterWindowMetricsEvent gains the engine's size constraint fields (sent as no constraints) and the padding fields, in the engine's order; engines without the patch ignore the padding. Metrics are sent again when only the content orientation changes, since turning upside down moves the cut-out without resizing. When built with FLUTTER_SFOS_VIEW_PADDING (the runtime spec sets it if the engine's flutter_embedder.h has the padding fields), the cut-out message says "in_metrics": true, so SailfishCutouts.builder doesn't add the padding a second time.
+The embedder's FlutterWindowMetricsEvent gains the engine's size constraint fields (sent as no constraints) and physical_padding, a FlutterEdgeInsets as proposed upstream for the Android embedder (flutter/rfc#24), in the engine's order; engines without the patch ignore it. Metrics are sent again when only the content orientation changes, since turning upside down moves the cut-out without resizing. When built with FLUTTER_SFOS_VIEW_PADDING (the runtime spec sets it if the engine's flutter_embedder.h has physical_padding), the cut-out message says "in_metrics": true, so SailfishCutouts.builder doesn't add the padding a second time.
 
 diff --git a/CMakeLists.txt b/CMakeLists.txt
 index 6590e93..edd7ad4 100644
@@ -33,10 +33,26 @@ index dfcc527..77d4292 100644
  if(USE_GLES3)
    add_definitions(-DUSE_GLES3)
 diff --git a/src/flutter/shell/platform/embedder/embedder.h b/src/flutter/shell/platform/embedder/embedder.h
-index 9e9b875..8b65890 100644
+index 9e9b875..2b100a9 100644
 --- a/src/flutter/shell/platform/embedder/embedder.h
 +++ b/src/flutter/shell/platform/embedder/embedder.h
-@@ -927,6 +927,28 @@ typedef struct {
+@@ -902,6 +902,15 @@ typedef struct {
+ /// stable until the Flutter application restarts.
+ typedef uint64_t FlutterEngineDisplayId;
+ 
++/// Physical edge insets (padding, view insets, or system gesture insets) in
++/// physical pixels.
++typedef struct {
++  double left;
++  double top;
++  double right;
++  double bottom;
++} FlutterEdgeInsets;
++
+ typedef struct {
+   /// The size of this struct. Must be sizeof(FlutterWindowMetricsEvent).
+   size_t struct_size;
+@@ -927,6 +936,20 @@ typedef struct {
    FlutterEngineDisplayId display_id;
    /// The view that this event is describing.
    int64_t view_id;
@@ -51,22 +67,14 @@ index 9e9b875..8b65890 100644
 +  size_t max_width_constraint;
 +  /// Maximum physical height of the window.
 +  size_t max_height_constraint;
-+  /// Top padding of window: the part covered by system UI or a display
-+  /// cut-out, which content should avoid. Flutter reports it as
-+  /// `viewPadding`. Needs an engine with the view padding patch; others
-+  /// ignore it.
-+  double physical_view_padding_top;
-+  /// Right padding of window.
-+  double physical_view_padding_right;
-+  /// Bottom padding of window.
-+  double physical_view_padding_bottom;
-+  /// Left padding of window.
-+  double physical_view_padding_left;
++  /// Safe-area padding (status bar, navigation bar) in physical pixels.
++  /// Needs an engine with the view padding patch; others ignore it.
++  FlutterEdgeInsets physical_padding;
  } FlutterWindowMetricsEvent;
  
  typedef struct {
 diff --git a/src/flutter/shell/platform/linux_embedded/flutter_elinux_view.cc b/src/flutter/shell/platform/linux_embedded/flutter_elinux_view.cc
-index 0e2b168..1fec726 100644
+index 0e2b168..7eeaba3 100644
 --- a/src/flutter/shell/platform/linux_embedded/flutter_elinux_view.cc
 +++ b/src/flutter/shell/platform/linux_embedded/flutter_elinux_view.cc
 @@ -137,6 +137,8 @@ void FlutterELinuxView::OnContentOrientationChanged() {
@@ -83,12 +91,12 @@ index 0e2b168..1fec726 100644
    event.physical_view_inset_bottom = insets.bottom;
    event.physical_view_inset_left = insets.left;
 +  // The display cut-outs, so MediaQuery.padding and SafeArea avoid them.
-+  // Engines without the view padding patch ignore these fields.
++  // Engines without the view padding patch ignore it.
 +  const auto padding = binding_handler_->GetDisplayCutouts().padding;
-+  event.physical_view_padding_top = padding.top;
-+  event.physical_view_padding_right = padding.right;
-+  event.physical_view_padding_bottom = padding.bottom;
-+  event.physical_view_padding_left = padding.left;
++  event.physical_padding.left = padding.left;
++  event.physical_padding.top = padding.top;
++  event.physical_padding.right = padding.right;
++  event.physical_padding.bottom = padding.bottom;
    engine_->SendWindowMetricsEvent(event);
  }
  

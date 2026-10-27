@@ -5,73 +5,74 @@ padding, so custom embedders can't tell apps about system UI or display
 cut-outs over the window: MediaQuery.viewPadding and padding stay zero, and
 SafeArea and app bars can't avoid a camera cut-out.
 
-This appends physical_view_padding_top/right/bottom/left to
-FlutterWindowMetricsEvent and copies them into the viewport metrics'
-physical_padding_*, which Dart reports as viewPadding (and padding, less
-the insets). They're read with SAFE_ACCESS, so embedders built against the
-old header give zero padding as before. Negative padding, or padding larger
-than the window, is rejected like invalid insets.
+This adds FlutterEdgeInsets and appends physical_padding to
+FlutterWindowMetricsEvent, as proposed for moving the Android embedder to
+the embedder API (flutter/rfc#24, draft flutter/flutter#195336), and copies
+it into the viewport metrics' physical_padding_*, which Dart reports as
+viewPadding (and padding, less the insets). It's only read if the event has
+it, so embedders built against the old header give zero padding as before.
+Negative padding is rejected.
 
-Not specific to Sailfish OS; a candidate for upstream Flutter.
+It matches that prototype's embedder.h and embedder.cc for this field, so
+the patch can be dropped once Flutter ships it. Not specific to Sailfish OS.
 
 diff --git a/engine/src/flutter/shell/platform/embedder/embedder.cc b/engine/src/flutter/shell/platform/embedder/embedder.cc
-index a9a4b21..e4a7819 100644
+index a9a4b21..b2d397f 100644
 --- a/engine/src/flutter/shell/platform/embedder/embedder.cc
 +++ b/engine/src/flutter/shell/platform/embedder/embedder.cc
-@@ -1660,6 +1660,14 @@ MakeViewportMetricsFromWindowMetrics(
-       SAFE_ACCESS(flutter_metrics, physical_view_inset_bottom, 0.0);
-   metrics.physical_view_inset_left =
+@@ -1662,6 +1662,13 @@ MakeViewportMetricsFromWindowMetrics(
        SAFE_ACCESS(flutter_metrics, physical_view_inset_left, 0.0);
-+  metrics.physical_padding_top =
-+      SAFE_ACCESS(flutter_metrics, physical_view_padding_top, 0.0);
-+  metrics.physical_padding_right =
-+      SAFE_ACCESS(flutter_metrics, physical_view_padding_right, 0.0);
-+  metrics.physical_padding_bottom =
-+      SAFE_ACCESS(flutter_metrics, physical_view_padding_bottom, 0.0);
-+  metrics.physical_padding_left =
-+      SAFE_ACCESS(flutter_metrics, physical_view_padding_left, 0.0);
    metrics.display_id = SAFE_ACCESS(flutter_metrics, display_id, 0);
  
++  if (STRUCT_HAS_MEMBER(flutter_metrics, physical_padding)) {
++    metrics.physical_padding_top = flutter_metrics->physical_padding.top;
++    metrics.physical_padding_right = flutter_metrics->physical_padding.right;
++    metrics.physical_padding_bottom = flutter_metrics->physical_padding.bottom;
++    metrics.physical_padding_left = flutter_metrics->physical_padding.left;
++  }
++
    if (metrics.device_pixel_ratio <= 0.0) {
-@@ -1681,6 +1689,20 @@ MakeViewportMetricsFromWindowMetrics(
+     return "Device pixel ratio was invalid. It must be greater than zero.";
+   }
+@@ -1681,6 +1688,12 @@ MakeViewportMetricsFromWindowMetrics(
             "physical height or width.";
    }
  
 +  if (metrics.physical_padding_top < 0 || metrics.physical_padding_right < 0 ||
 +      metrics.physical_padding_bottom < 0 ||
 +      metrics.physical_padding_left < 0) {
-+    return "Physical view padding is invalid. It must be non-negative.";
-+  }
-+
-+  if (metrics.physical_padding_top > metrics.physical_height ||
-+      metrics.physical_padding_right > metrics.physical_width ||
-+      metrics.physical_padding_bottom > metrics.physical_height ||
-+      metrics.physical_padding_left > metrics.physical_width) {
-+    return "Physical view padding is invalid. It cannot be greater than "
-+           "physical height or width.";
++    return "Physical padding values are invalid. They must be non-negative.";
 +  }
 +
    return metrics;
  }
  
 diff --git a/engine/src/flutter/shell/platform/embedder/embedder.h b/engine/src/flutter/shell/platform/embedder/embedder.h
-index 232bb8e..38b2b51 100644
+index 232bb8e..3a6b07f 100644
 --- a/engine/src/flutter/shell/platform/embedder/embedder.h
 +++ b/engine/src/flutter/shell/platform/embedder/embedder.h
-@@ -1097,6 +1097,16 @@ typedef struct {
+@@ -1049,6 +1049,15 @@ typedef struct {
+ /// stable until the Flutter application restarts.
+ typedef uint64_t FlutterEngineDisplayId;
+ 
++/// Physical edge insets (padding, view insets, or system gesture insets) in
++/// physical pixels.
++typedef struct {
++  double left;
++  double top;
++  double right;
++  double bottom;
++} FlutterEdgeInsets;
++
+ typedef struct {
+   /// The size of this struct. Must be sizeof(FlutterWindowMetricsEvent).
+   size_t struct_size;
+@@ -1097,6 +1106,8 @@ typedef struct {
    /// If |has_constraints| is `true`, this must be greater than or equal to
    /// |min_height_constraint| and |height|.
    size_t max_height_constraint;
-+  /// Top padding of window: the part covered by system UI or a display
-+  /// cut-out, which content should avoid. Flutter reports it as
-+  /// `viewPadding`.
-+  double physical_view_padding_top;
-+  /// Right padding of window.
-+  double physical_view_padding_right;
-+  /// Bottom padding of window.
-+  double physical_view_padding_bottom;
-+  /// Left padding of window.
-+  double physical_view_padding_left;
++  /// Safe-area padding (status bar, navigation bar) in physical pixels.
++  FlutterEdgeInsets physical_padding;
  } FlutterWindowMetricsEvent;
  
  typedef struct {

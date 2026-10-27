@@ -78,10 +78,11 @@ export CC=clang
 export CXX=clang++
 
 # Whether the engine reports view padding (its view padding patch, which
-# adds these fields to the embedder API). Only then does the embedder tell
-# apps the cut-out padding is already in MediaQuery.padding.
+# adds physical_padding to the embedder API's window metrics). Only then
+# does the embedder tell apps the cut-out padding is already in
+# MediaQuery.padding.
 view_padding=OFF
-if grep -q physical_view_padding_top engine/flutter_embedder.h; then
+if grep -q 'FlutterEdgeInsets physical_padding;' engine/flutter_embedder.h; then
 	view_padding=ON
 fi
 
