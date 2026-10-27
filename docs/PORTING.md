@@ -227,6 +227,7 @@ Add the ones you use next to the plugin itself:
 | package_info_plus | [package_info_plus_sailfish](../packages/package_info_plus_sailfish) | Name and id from the desktop file |
 | connectivity_plus | [connectivity_plus_sailfish](../packages/connectivity_plus_sailfish) | From ConnMan; needs the `Internet` permission |
 | url_launcher | [url_launcher_sailfish](../packages/url_launcher_sailfish) | Opens links in other apps; needs runtime 7.sfos6 (patch 0013) |
+| geolocator | [geolocator_sailfish](../packages/geolocator_sailfish) | From GeoClue; needs the `Location` permission |
 | screen_brightness | [screen_brightness_sailfish](../packages/screen_brightness_sailfish) | Changes the phone's brightness setting, as on iOS, and puts it back |
 | video_player | [video_player_sailfish](../packages/video_player_sailfish) | GStreamer, software decoding; the app's RPM needs GStreamer ([how](../packages/video_player_sailfish/README.md#use)) |
 
