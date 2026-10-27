@@ -1,0 +1,363 @@
+Open URLs through Lipstick, as Qt apps do.
+
+Sailjail's sandbox leaves apps no way of their own to open a URL: there's no
+xdg-open in it, and no permission allows Lipstick's org.sailfishos.fileservice
+D-Bus service. Qt apps send the URL to the compositor with the
+qt_windowmanager Wayland extension instead, and Lipstick opens it with
+libcontentaction, outside the sandbox.
+
+The runtime now binds qt_windowmanager (protocol file from QtWayland 5.15,
+BSD like surface-extension.xml) and offers it on the JSON method channel
+flutter-sfos/open_url: openUrl with the URL returns false if the compositor
+doesn't offer it. Long URLs go in 128-byte parts, as Qt sends them, each
+ending on a whole UTF-8 character. Checking that an app handles the URL is
+left to the caller.
+
+diff --git a/cmake/build.cmake b/cmake/build.cmake
+index 626dcac..dfcc527 100644
+--- a/cmake/build.cmake
++++ b/cmake/build.cmake
+@@ -74,6 +74,12 @@ else()
+     CODE_FILE "${_wayland_protocols_src_dir}/surface-extension-protocol.c"
+     HEADER_FILE "${_wayland_protocols_src_dir}/surface-extension-client-protocol.h")
+ 
++  # Qt window manager extension (open_url), also from Lipstick.
++  generate_wayland_client_protocol(
++    PROTOCOL_FILE "${CMAKE_CURRENT_SOURCE_DIR}/src/third_party/qtwayland/qt-windowmanager.xml"
++    CODE_FILE "${_wayland_protocols_src_dir}/qt-windowmanager-protocol.c"
++    HEADER_FILE "${_wayland_protocols_src_dir}/qt-windowmanager-client-protocol.h")
++
+   add_definitions(-DFLUTTER_TARGET_BACKEND_WAYLAND)
+   add_definitions(-DDISPLAY_BACKEND_TYPE_WAYLAND)
+   set(DISPLAY_BACKEND_SRC
+@@ -83,6 +89,7 @@ else()
+     "${_wayland_protocols_src_dir}/presentation-time-protocol.c"
+     "${_wayland_protocols_src_dir}/xdg-decoration-unstable-v1-protocol.c"
+     "${_wayland_protocols_src_dir}/surface-extension-protocol.c"
++    "${_wayland_protocols_src_dir}/qt-windowmanager-protocol.c"
+     "src/flutter/shell/platform/linux_embedded/window/cover_window_wayland.cc"
+     "src/flutter/shell/platform/linux_embedded/window/elinux_window_wayland.cc"
+     "src/flutter/shell/platform/linux_embedded/window/native_window_wayland.cc"
+@@ -166,6 +173,7 @@ set(ELINUX_COMMON_SRC
+   "src/flutter/shell/platform/linux_embedded/plugins/lifecycle_plugin.cc"
+   "src/flutter/shell/platform/linux_embedded/plugins/mouse_cursor_plugin.cc"
+   "src/flutter/shell/platform/linux_embedded/plugins/navigation_plugin.cc"
++  "src/flutter/shell/platform/linux_embedded/plugins/open_url_plugin.cc"
+   "src/flutter/shell/platform/linux_embedded/plugins/platform_plugin.cc"
+   "src/flutter/shell/platform/linux_embedded/plugins/platform_views_plugin.cc"
+   "src/flutter/shell/platform/linux_embedded/plugins/settings_plugin.cc"
+diff --git a/src/flutter/shell/platform/linux_embedded/flutter_elinux_view.cc b/src/flutter/shell/platform/linux_embedded/flutter_elinux_view.cc
+index c55f4d5..0e2b168 100644
+--- a/src/flutter/shell/platform/linux_embedded/flutter_elinux_view.cc
++++ b/src/flutter/shell/platform/linux_embedded/flutter_elinux_view.cc
+@@ -92,6 +92,8 @@ void FlutterELinuxView::SetEngine(std::unique_ptr<FlutterELinuxEngine> engine) {
+       internal_plugin_messenger, binding_handler_.get());
+   cover_handler_ = std::make_unique<flutter::CoverPlugin>(
+       internal_plugin_messenger, binding_handler_.get());
++  open_url_handler_ = std::make_unique<flutter::OpenUrlPlugin>(
++      internal_plugin_messenger, binding_handler_.get());
+ 
+   PhysicalWindowBounds bounds = binding_handler_->GetPhysicalWindowBounds();
+   SendWindowMetrics(bounds.width, bounds.height,
+diff --git a/src/flutter/shell/platform/linux_embedded/flutter_elinux_view.h b/src/flutter/shell/platform/linux_embedded/flutter_elinux_view.h
+index c9e5eec..be4635d 100644
+--- a/src/flutter/shell/platform/linux_embedded/flutter_elinux_view.h
++++ b/src/flutter/shell/platform/linux_embedded/flutter_elinux_view.h
+@@ -20,6 +20,7 @@
+ #include "flutter/shell/platform/linux_embedded/plugins/lifecycle_plugin.h"
+ #include "flutter/shell/platform/linux_embedded/plugins/mouse_cursor_plugin.h"
+ #include "flutter/shell/platform/linux_embedded/plugins/navigation_plugin.h"
++#include "flutter/shell/platform/linux_embedded/plugins/open_url_plugin.h"
+ #include "flutter/shell/platform/linux_embedded/plugins/platform_plugin.h"
+ #include "flutter/shell/platform/linux_embedded/plugins/platform_views_plugin.h"
+ #include "flutter/shell/platform/linux_embedded/plugins/settings_plugin.h"
+@@ -330,6 +331,9 @@ class FlutterELinuxView : public WindowBindingHandlerDelegate {
+   // Handler for flutter-sfos/cover channel.
+   std::unique_ptr<flutter::CoverPlugin> cover_handler_;
+ 
++  // Handler for flutter-sfos/open_url channel.
++  std::unique_ptr<flutter::OpenUrlPlugin> open_url_handler_;
++
+   // Currently configured WindowBindingHandler for view.
+   std::unique_ptr<flutter::WindowBindingHandler> binding_handler_;
+ 
+diff --git a/src/flutter/shell/platform/linux_embedded/plugins/open_url_plugin.cc b/src/flutter/shell/platform/linux_embedded/plugins/open_url_plugin.cc
+new file mode 100644
+index 0000000..624af4e
+--- /dev/null
++++ b/src/flutter/shell/platform/linux_embedded/plugins/open_url_plugin.cc
+@@ -0,0 +1,56 @@
++// Copyright 2026 Dave Nash. All rights reserved.
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#include "flutter/shell/platform/linux_embedded/plugins/open_url_plugin.h"
++
++#include "flutter/shell/platform/common/json_method_codec.h"
++
++// X11's Success macro breaks result->Success (see platform_plugin.cc).
++#if defined(DISPLAY_BACKEND_TYPE_X11)
++#undef Success
++#endif
++
++namespace flutter {
++
++namespace {
++constexpr char kChannelName[] = "flutter-sfos/open_url";
++
++constexpr char kOpenUrlMethod[] = "openUrl";
++
++constexpr char kBadArgumentsError[] = "Bad Arguments";
++}  // namespace
++
++OpenUrlPlugin::OpenUrlPlugin(BinaryMessenger* messenger,
++                             WindowBindingHandler* delegate)
++    : channel_(std::make_unique<MethodChannel<rapidjson::Document>>(
++          messenger,
++          kChannelName,
++          &JsonMethodCodec::GetInstance())),
++      delegate_(delegate) {
++  channel_->SetMethodCallHandler(
++      [this](const MethodCall<rapidjson::Document>& call,
++             std::unique_ptr<MethodResult<rapidjson::Document>> result) {
++        HandleMethodCall(call, std::move(result));
++      });
++}
++
++void OpenUrlPlugin::HandleMethodCall(
++    const MethodCall<rapidjson::Document>& method_call,
++    std::unique_ptr<MethodResult<rapidjson::Document>> result) {
++  if (method_call.method_name() != kOpenUrlMethod) {
++    result->NotImplemented();
++    return;
++  }
++  const rapidjson::Document* url = method_call.arguments();
++  if (!url || !url->IsString()) {
++    result->Error(kBadArgumentsError, "openUrl expects the URL as a string.");
++    return;
++  }
++  rapidjson::Document opened;
++  opened.SetBool(delegate_->OpenUrl(
++      std::string(url->GetString(), url->GetStringLength())));
++  result->Success(opened);
++}
++
++}  // namespace flutter
+diff --git a/src/flutter/shell/platform/linux_embedded/plugins/open_url_plugin.h b/src/flutter/shell/platform/linux_embedded/plugins/open_url_plugin.h
+new file mode 100644
+index 0000000..f946533
+--- /dev/null
++++ b/src/flutter/shell/platform/linux_embedded/plugins/open_url_plugin.h
+@@ -0,0 +1,40 @@
++// Copyright 2026 Dave Nash. All rights reserved.
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#ifndef FLUTTER_SHELL_PLATFORM_LINUX_EMBEDDED_PLUGINS_OPEN_URL_PLUGIN_H_
++#define FLUTTER_SHELL_PLATFORM_LINUX_EMBEDDED_PLUGINS_OPEN_URL_PLUGIN_H_
++
++#include <rapidjson/document.h>
++
++#include <memory>
++
++#include "flutter/shell/platform/common/client_wrapper/include/flutter/binary_messenger.h"
++#include "flutter/shell/platform/common/client_wrapper/include/flutter/method_channel.h"
++#include "flutter/shell/platform/linux_embedded/window_binding_handler.h"
++
++namespace flutter {
++
++// Opens URLs in the apps that handle them on Sailfish OS.
++//
++// On flutter-sfos/open_url (JSON method channel), openUrl with the URL as its
++// argument asks the compositor to open it, as Qt apps do; Sailjail's sandbox
++// leaves apps no other way. The result is false if the compositor can't be
++// asked. Whether an app handles the URL is up to the caller to check.
++class OpenUrlPlugin {
++ public:
++  OpenUrlPlugin(BinaryMessenger* messenger, WindowBindingHandler* delegate);
++  ~OpenUrlPlugin() = default;
++
++ private:
++  void HandleMethodCall(
++      const MethodCall<rapidjson::Document>& method_call,
++      std::unique_ptr<MethodResult<rapidjson::Document>> result);
++
++  std::unique_ptr<MethodChannel<rapidjson::Document>> channel_;
++  WindowBindingHandler* delegate_;
++};
++
++}  // namespace flutter
++
++#endif  // FLUTTER_SHELL_PLATFORM_LINUX_EMBEDDED_PLUGINS_OPEN_URL_PLUGIN_H_
+diff --git a/src/flutter/shell/platform/linux_embedded/window/elinux_window_wayland.cc b/src/flutter/shell/platform/linux_embedded/window/elinux_window_wayland.cc
+index 1ccf3a0..5209676 100644
+--- a/src/flutter/shell/platform/linux_embedded/window/elinux_window_wayland.cc
++++ b/src/flutter/shell/platform/linux_embedded/window/elinux_window_wayland.cc
+@@ -1483,6 +1483,11 @@ ELinuxWindowWayland::~ELinuxWindowWayland() {
+     qt_surface_extension_ = nullptr;
+   }
+ 
++  if (qt_windowmanager_) {
++    qt_windowmanager_destroy(qt_windowmanager_);
++    qt_windowmanager_ = nullptr;
++  }
++
+   if (wl_shell_) {
+     wl_shell_destroy(wl_shell_);
+     wl_shell_ = nullptr;
+@@ -2042,6 +2047,12 @@ void ELinuxWindowWayland::WlRegistryHandler(wl_registry* wl_registry,
+     return;
+   }
+ 
++  if (!strcmp(interface, qt_windowmanager_interface.name)) {
++    qt_windowmanager_ = static_cast<decltype(qt_windowmanager_)>(
++        wl_registry_bind(wl_registry, name, &qt_windowmanager_interface, 1));
++    return;
++  }
++
+   if (!strcmp(interface, wl_seat_interface.name)) {
+     constexpr uint32_t kMaxVersion = 4;
+     auto [inserted, _] =
+@@ -2570,6 +2581,31 @@ void ELinuxWindowWayland::SetCoverActions(const std::string& actions) {
+   }
+ }
+ 
++bool ELinuxWindowWayland::OpenUrl(const std::string& url) {
++  if (!qt_windowmanager_ || url.empty() ||
++      url.find('\0') != std::string::npos) {
++    return false;
++  }
++  // Sent in parts, as Qt does, to stay well under Wayland's message size.
++  // Lipstick joins them up to the one with remaining set to 0. Parts end on
++  // whole UTF-8 characters, since each is a string of its own.
++  constexpr size_t kPartSize = 128;
++  size_t start = 0;
++  while (start < url.size()) {
++    size_t end = std::min(start + kPartSize, url.size());
++    while (end < url.size() &&
++           (static_cast<unsigned char>(url[end]) & 0xc0) == 0x80) {
++      end--;
++    }
++    const uint32_t remaining = end < url.size() ? 1 : 0;
++    qt_windowmanager_open_url(qt_windowmanager_, remaining,
++                              url.substr(start, end - start).c_str());
++    start = end;
++  }
++  wl_display_flush(wl_display_);
++  return true;
++}
++
+ bool ELinuxWindowWayland::IsTransformAllowed(int32_t transform) const {
+   return preferred_transforms_.empty() ||
+          std::find(preferred_transforms_.begin(), preferred_transforms_.end(),
+diff --git a/src/flutter/shell/platform/linux_embedded/window/elinux_window_wayland.h b/src/flutter/shell/platform/linux_embedded/window/elinux_window_wayland.h
+index adb8f24..5018aa5 100644
+--- a/src/flutter/shell/platform/linux_embedded/window/elinux_window_wayland.h
++++ b/src/flutter/shell/platform/linux_embedded/window/elinux_window_wayland.h
+@@ -23,6 +23,7 @@
+ // wayland-scanner.
+ extern "C" {
+ #include "wayland/protocols/presentation-time-protocol.h"
++#include "wayland/protocols/qt-windowmanager-client-protocol.h"
+ #include "wayland/protocols/surface-extension-client-protocol.h"
+ #include "wayland/protocols/text-input-unstable-v1-client-protocol.h"
+ #include "wayland/protocols/text-input-unstable-v3-client-protocol.h"
+@@ -111,6 +112,9 @@ class ELinuxWindowWayland : public ELinuxWindow, public WindowBindingHandler {
+                      int32_t height,
+                      const uint8_t* rgba) override;
+ 
++  // |FlutterWindowBindingHandler|
++  bool OpenUrl(const std::string& url) override;
++
+   // |FlutterWindowBindingHandler|
+   void UpdateVirtualKeyboardArea(int32_t x,
+                                  int32_t y,
+@@ -286,6 +290,9 @@ class ELinuxWindowWayland : public ELinuxWindow, public WindowBindingHandler {
+   wl_shell_surface* wl_shell_surface_ = nullptr;
+   qt_surface_extension* qt_surface_extension_ = nullptr;
+   qt_extended_surface* qt_extended_surface_ = nullptr;
++  // Lipstick opens URLs for apps through it, as for Qt apps. Its events
++  // (hints, quit) aren't needed, so it has no listener and they're dropped.
++  qt_windowmanager* qt_windowmanager_ = nullptr;
+   bool shown_as_cover_ = false;
+   // Allowed wl_output transforms, most preferred first; empty allows any.
+   std::vector<int32_t> preferred_transforms_;
+diff --git a/src/flutter/shell/platform/linux_embedded/window_binding_handler.h b/src/flutter/shell/platform/linux_embedded/window_binding_handler.h
+index 6910538..57269cb 100644
+--- a/src/flutter/shell/platform/linux_embedded/window_binding_handler.h
++++ b/src/flutter/shell/platform/linux_embedded/window_binding_handler.h
+@@ -150,6 +150,10 @@ class WindowBindingHandler {
+                              int32_t height,
+                              const uint8_t* rgba) {}
+ 
++  // Asks the compositor to open |url| in the app that handles it. Returns
++  // false if the compositor can't be asked.
++  virtual bool OpenUrl(const std::string& url) { return false; }
++
+   // Returns the clipboard data.
+   virtual std::string GetClipboardData() = 0;
+ 
+diff --git a/src/third_party/qtwayland/qt-windowmanager.xml b/src/third_party/qtwayland/qt-windowmanager.xml
+new file mode 100644
+index 0000000..86ddff7
+--- /dev/null
++++ b/src/third_party/qtwayland/qt-windowmanager.xml
+@@ -0,0 +1,58 @@
++<protocol name="qt_windowmanager">
++
++    <copyright>
++ Copyright (C) 2015 The Qt Company Ltd.
++ Contact: http://www.qt.io/licensing/
++
++ This file is part of the plugins of the Qt Toolkit.
++
++ $QT_BEGIN_LICENSE:BSD$
++ You may use this file under the terms of the BSD license as follows:
++
++ "Redistribution and use in source and binary forms, with or without
++ modification, are permitted provided that the following conditions are
++ met:
++   * Redistributions of source code must retain the above copyright
++     notice, this list of conditions and the following disclaimer.
++   * Redistributions in binary form must reproduce the above copyright
++     notice, this list of conditions and the following disclaimer in
++     the documentation and/or other materials provided with the
++     distribution.
++   * Neither the name of The Qt Company Ltd nor the names of its
++     contributors may be used to endorse or promote products derived
++     from this software without specific prior written permission.
++
++
++ THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
++ "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
++ LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
++ A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
++ OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
++ SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
++ LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
++ DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
++ THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
++ (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
++ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE."
++
++ $QT_END_LICENSE$
++    </copyright>
++
++    <interface name="qt_windowmanager" version="1">
++        <request name="open_url">
++            <description summary="client requests a url to be opened">
++                If remaining is not 0 this is a multipart request, and
++                the server must concatenate subsequent requst urls to and
++                including a request where remaining is set to 0, before
++                it can handle the url.
++            </description>
++            <arg name="remaining" type="uint" />
++            <arg name="url" type="string" />
++        </request>
++        <event name="hints">
++            <arg name="show_is_fullscreen" type="int"/>
++        </event>
++        <event name="quit">
++        </event>
++    </interface>
++</protocol>

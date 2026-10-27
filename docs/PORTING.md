@@ -219,6 +219,7 @@ Add the ones you use next to the plugin itself:
 | flutter_secure_storage | [flutter_secure_storage_sailfish](../packages/flutter_secure_storage_sailfish) | A private file, not encrypted ([how safe](../packages/flutter_secure_storage_sailfish/README.md#how-safe-it-is)) |
 | package_info_plus | [package_info_plus_sailfish](../packages/package_info_plus_sailfish) | Name and id from the desktop file |
 | connectivity_plus | [connectivity_plus_sailfish](../packages/connectivity_plus_sailfish) | From ConnMan; needs the `Internet` permission |
+| url_launcher | [url_launcher_sailfish](../packages/url_launcher_sailfish) | Opens links in other apps; needs runtime 7.sfos6 (patch 0013) |
 
 ## Sandboxing (Sailjail)
 

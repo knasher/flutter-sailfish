@@ -1,0 +1,27 @@
+name: url_launcher_sailfish
+description: Sailfish OS implementation of url_launcher. Opens links in the apps that handle them, through the compositor as Qt apps do.
+version: 0.1.0
+# Not published yet.
+publish_to: none
+
+environment:
+  sdk: ^3.11.5
+  flutter: ">=3.41.0"
+
+dependencies:
+  flutter:
+    sdk: flutter
+  url_launcher_platform_interface: ^2.3.2
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+
+# flutter-elinux registers elinux Dart plugins after Flutter registers the
+# Linux ones, so on Sailfish OS this replaces url_launcher_linux.
+flutter:
+  plugin:
+    implements: url_launcher
+    platforms:
+      elinux:
+        dartPluginClass: UrlLauncherSailfish
