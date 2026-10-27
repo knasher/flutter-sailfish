@@ -1,0 +1,77 @@
+Apply the embedder's surface transformation with Impeller (OpenGL).
+
+Embedders can turn the whole picture with a surface transformation
+(FlutterOpenGLRendererConfig.surface_transformation), e.g. to rotate it for
+a display whose orientation changed. The Skia backend applies it, but
+Impeller's OpenGL surface returned identity, so a rotated app was drawn
+unturned: sideways, at the wrong size.
+
+The surface now asks its delegate for the transformation, as the Skia one
+does, and draws into a framebuffer of the turned size with the
+transformation set on the frame's canvas. Delegates that don't transform
+(the default) get identity, so nothing changes for them.
+
+Not specific to Sailfish OS; a candidate for upstream Flutter.
+
+diff --git a/engine/src/flutter/shell/gpu/gpu_surface_gl_impeller.cc b/engine/src/flutter/shell/gpu/gpu_surface_gl_impeller.cc
+index 3645df1..a537823 100644
+--- a/engine/src/flutter/shell/gpu/gpu_surface_gl_impeller.cc
++++ b/engine/src/flutter/shell/gpu/gpu_surface_gl_impeller.cc
+@@ -87,15 +87,24 @@ std::unique_ptr<SurfaceFrame> GPUSurfaceGLImpeller::AcquireFrame(
+         [](const SurfaceFrame& surface_frame) { return true; }, size);
+   }
+ 
+-  GLFrameInfo frame_info = {static_cast<uint32_t>(size.width),
+-                            static_cast<uint32_t>(size.height)};
++  // The embedder may turn the whole picture (its surface transformation,
++  // e.g. for a rotated display). As the Skia backend does, draw into a
++  // framebuffer of the turned size, with the transformation applied.
++  const DlMatrix root_transformation = GetRootTransformation();
++  const DlISize fbo_size =
++      DlIRect::RoundOut(
++          DlRect::MakeSize(size).TransformAndClipBounds(root_transformation))
++          .GetSize();
++
++  GLFrameInfo frame_info = {static_cast<uint32_t>(fbo_size.width),
++                            static_cast<uint32_t>(fbo_size.height)};
+   const GLFBOInfo fbo_info = delegate_->GLContextFBO(frame_info);
+   auto surface = impeller::SurfaceGLES::WrapFBO(
+       impeller_context_,                         // context
+       swap_callback,                             // swap_callback
+       fbo_info.fbo_id,                           // fbo
+       impeller::PixelFormat::kR8G8B8A8UNormInt,  // color_format
+-      impeller::ISize{size.width, size.height}   // fbo_size
++      impeller::ISize{fbo_size.width, fbo_size.height}  // fbo_size
+   );
+ 
+   impeller::RenderTarget render_target = surface->GetRenderTarget();
+@@ -125,24 +134,24 @@ std::unique_ptr<SurfaceFrame> GPUSurfaceGLImpeller::AcquireFrame(
+     return true;
+   };
+ 
+-  return std::make_unique<SurfaceFrame>(
++  auto frame = std::make_unique<SurfaceFrame>(
+       nullptr,                                // surface
+       delegate_->GLContextFramebufferInfo(),  // framebuffer info
+       encode_callback,                        // encode callback
+       fml::MakeCopyable([surface = std::move(surface)](const SurfaceFrame&) {
+         return surface->Present();
+       }),                         // submit callback
+-      size,                       // frame size
++      fbo_size,                   // frame size
+       std::move(context_switch),  // context result
+       true                        // display list fallback
+   );
++  frame->Canvas()->SetTransform(root_transformation);
++  return frame;
+ }
+ 
+ // |Surface|
+ DlMatrix GPUSurfaceGLImpeller::GetRootTransformation() const {
+-  // This backend does not currently support root surface transformations. Just
+-  // return identity.
+-  return {};
++  return delegate_->GLContextSurfaceTransformation();
+ }
+ 
+ // |Surface|

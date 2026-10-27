@@ -1,0 +1,355 @@
+Pass the Impeller context to LayerTree::Flatten (backport).
+
+Backport of flutter/flutter#191017 (commit bb8568060, "Makes sure impeller
+context's are plumbed through to LayerTree::Flatten", fixes
+flutter/flutter#190774), which isn't in 3.44.
+
+With Impeller, snapshotting a layer tree that holds an external texture
+(Scene.toImageSync, which page transitions use, while a video is on
+screen) flattened it without the Impeller context, so the embedder's GL
+texture took the Skia path and called flushAndSubmit on a null
+GrDirectContext: a segfault on the raster thread. Seen in Kudos when
+leaving the welcome screen with its video playing.
+
+The upstream change applied as is, except two files that differ in 3.44
+and were ported by hand: lib/ui/snapshot_delegate.h (the same three
+additions) and lib/ui/painting/picture.cc (3.44 has no is_impeller_enabled
+there, so Impeller is told by the delegate having an AiksContext). Its unit
+tests are included but aren't part of the release build.
+
+diff --git a/engine/src/flutter/flow/layers/layer_tree.cc b/engine/src/flutter/flow/layers/layer_tree.cc
+index bfdb419a655..f125e93e4de 100644
+--- a/engine/src/flutter/flow/layers/layer_tree.cc
++++ b/engine/src/flutter/flow/layers/layer_tree.cc
+@@ -147,7 +147,8 @@ void LayerTree::Paint(CompositorContext::ScopedFrame& frame,
+ sk_sp<DisplayList> LayerTree::Flatten(
+     const DlRect& bounds,
+     const std::shared_ptr<TextureRegistry>& texture_registry,
+-    GrDirectContext* gr_context) {
++    GrDirectContext* gr_context,
++    impeller::AiksContext* aiks_context) {
+   TRACE_EVENT0("flutter", "LayerTree::Flatten");
+ 
+   DisplayListBuilder builder(bounds);
+@@ -188,6 +189,8 @@ sk_sp<DisplayList> LayerTree::Flatten(
+ #if !SLIMPELLER
+       .raster_cache                  = nullptr,
+ #endif  //  !SLIMPELLER
++      .impeller_enabled              = !!aiks_context,
++      .aiks_context                  = aiks_context,
+       // clang-format on
+   };
+ 
+diff --git a/engine/src/flutter/flow/layers/layer_tree.h b/engine/src/flutter/flow/layers/layer_tree.h
+index 430f836ba41..193e0c0af4e 100644
+--- a/engine/src/flutter/flow/layers/layer_tree.h
++++ b/engine/src/flutter/flow/layers/layer_tree.h
+@@ -48,7 +48,8 @@ class LayerTree {
+   sk_sp<DisplayList> Flatten(
+       const DlRect& bounds,
+       const std::shared_ptr<TextureRegistry>& texture_registry = nullptr,
+-      GrDirectContext* gr_context = nullptr);
++      GrDirectContext* gr_context = nullptr,
++      impeller::AiksContext* aiks_context = nullptr);
+ 
+   Layer* root_layer() const { return root_layer_.get(); }
+   const DlISize& frame_size() const { return frame_size_; }
+diff --git a/engine/src/flutter/flow/layers/layer_tree_unittests.cc b/engine/src/flutter/flow/layers/layer_tree_unittests.cc
+index 7ae62534da4..e03acb2b157 100644
+--- a/engine/src/flutter/flow/layers/layer_tree_unittests.cc
++++ b/engine/src/flutter/flow/layers/layer_tree_unittests.cc
+@@ -12,6 +12,7 @@
+ #include "flutter/fml/macros.h"
+ #include "flutter/testing/canvas_test.h"
+ #include "flutter/testing/display_list_testing.h"
++#include "gmock/gmock.h"
+ #include "gtest/gtest.h"
+ 
+ namespace flutter {
+@@ -277,5 +278,43 @@ TEST_F(LayerTreeTest, PaintContextInitialization) {
+   expect_defaults(context);
+ }
+ 
++namespace {
++
++class MockFlattenLayer : public Layer {
++ public:
++  MockFlattenLayer() { set_paint_bounds(DlRect::MakeWH(100, 100)); }
++
++  MOCK_METHOD(void, Preroll, (PrerollContext*), (override));
++  MOCK_METHOD(void, Paint, (PaintContext&), (const, override));
++};
++
++}  // namespace
++
++TEST_F(LayerTreeTest, FlattenInitializesContexts) {
++  auto layer = std::make_shared<MockFlattenLayer>();
++  auto layer_tree = BuildLayerTree(layer);
++
++  EXPECT_CALL(*layer, Preroll(::testing::_)).Times(2);
++
++  // Default: null contexts
++  EXPECT_CALL(*layer, Paint(::testing::_)).WillOnce([](PaintContext& context) {
++    EXPECT_EQ(context.gr_context, nullptr);
++    EXPECT_EQ(context.aiks_context, nullptr);
++    EXPECT_FALSE(context.impeller_enabled);
++  });
++  layer_tree->Flatten(DlRect::MakeWH(100, 100));
++
++  // With a fake AiksContext pointer
++  auto fake_aiks = reinterpret_cast<impeller::AiksContext*>(0x1234);
++  EXPECT_CALL(*layer, Paint(::testing::_))
++      .WillOnce([fake_aiks](PaintContext& context) {
++        EXPECT_EQ(context.gr_context, nullptr);
++        EXPECT_EQ(context.aiks_context, fake_aiks);
++        EXPECT_TRUE(context.impeller_enabled);
++      });
++  layer_tree->Flatten(DlRect::MakeWH(100, 100), /*texture_registry=*/nullptr,
++                      /*gr_context=*/nullptr, fake_aiks);
++}
++
+ }  // namespace testing
+ }  // namespace flutter
+diff --git a/engine/src/flutter/lib/ui/painting/display_list_deferred_image_gpu_impeller.cc b/engine/src/flutter/lib/ui/painting/display_list_deferred_image_gpu_impeller.cc
+index e7bb36547fe..0b2ea32b4ad 100644
+--- a/engine/src/flutter/lib/ui/painting/display_list_deferred_image_gpu_impeller.cc
++++ b/engine/src/flutter/lib/ui/painting/display_list_deferred_image_gpu_impeller.cc
+@@ -8,6 +8,7 @@
+ #include <variant>
+ 
+ #include "flutter/fml/make_copyable.h"
++#include "impeller/display_list/aiks_context.h"
+ 
+ // Disable a warning on Windows about use of deprecated atomic operations
+ // on std::shared_ptr.  These functions are used because libcxx does not
+@@ -171,9 +172,11 @@ void DlDeferredImageGPUImpeller::ImageWrapper::SnapshotDisplayList(
+                        content)) {
+           std::unique_ptr<LayerTree> layer_tree =
+               std::get<std::unique_ptr<LayerTree>>(std::move(content));
++          auto aiks_context = snapshot_delegate->GetAiksContext();
+           display_list = layer_tree->Flatten(
+               DlRect::MakeWH(wrapper->size_.width, wrapper->size_.height),
+-              snapshot_delegate->GetTextureRegistry());
++              snapshot_delegate->GetTextureRegistry(),
++              /*gr_context=*/nullptr, aiks_context.get());
+         }
+ 
+         auto snapshot = snapshot_delegate->MakeRasterSnapshotSync(
+diff --git a/engine/src/flutter/lib/ui/painting/picture.cc b/engine/src/flutter/lib/ui/painting/picture.cc
+index 4af953baed9..b11db6f8dfe 100644
+--- a/engine/src/flutter/lib/ui/painting/picture.cc
++++ b/engine/src/flutter/lib/ui/painting/picture.cc
+@@ -232,10 +232,13 @@ Dart_Handle Picture::DoRasterizeToImage(const sk_sp<DisplayList>& display_list,
+         sk_sp<DisplayList> snapshot_display_list = display_list;
+         if (layer_tree) {
+           FML_DCHECK(picture_bounds == layer_tree->frame_size());
+-          snapshot_display_list =
+-              layer_tree->Flatten(DlRect::MakeWH(width, height),
+-                                  snapshot_delegate->GetTextureRegistry(),
+-                                  snapshot_delegate->GetGrContext());
++          // Only Impeller has an AiksContext.
++          auto aiks_context = snapshot_delegate->GetAiksContext();
++          snapshot_display_list = layer_tree->Flatten(
++              DlRect::MakeWH(width, height),
++              snapshot_delegate->GetTextureRegistry(),
++              aiks_context ? nullptr : snapshot_delegate->GetGrContext(),
++              aiks_context.get());
+         }
+         snapshot_delegate->MakeRasterSnapshot(
+             snapshot_display_list, picture_bounds,
+diff --git a/engine/src/flutter/lib/ui/painting/testing/mocks.h b/engine/src/flutter/lib/ui/painting/testing/mocks.h
+index 5d63b25bede..305ed8f956f 100644
+--- a/engine/src/flutter/lib/ui/painting/testing/mocks.h
++++ b/engine/src/flutter/lib/ui/painting/testing/mocks.h
+@@ -34,6 +34,10 @@ class MockSnapshotDelegate : public SnapshotDelegate {
+               (),
+               (override));
+   MOCK_METHOD(GrDirectContext*, GetGrContext, (), (override));
++  MOCK_METHOD(std::shared_ptr<impeller::AiksContext>,
++              GetAiksContext,
++              (),
++              (const, override));
+   MOCK_METHOD(void,
+               MakeRasterSnapshot,
+               (sk_sp<DisplayList>,
+diff --git a/engine/src/flutter/lib/ui/snapshot_delegate.h b/engine/src/flutter/lib/ui/snapshot_delegate.h
+index 65ba9030919..cb4c49fb18c 100644
+--- a/engine/src/flutter/lib/ui/snapshot_delegate.h
++++ b/engine/src/flutter/lib/ui/snapshot_delegate.h
+@@ -5,6 +5,7 @@
+ #ifndef FLUTTER_LIB_UI_SNAPSHOT_DELEGATE_H_
+ #define FLUTTER_LIB_UI_SNAPSHOT_DELEGATE_H_
+ 
++#include <memory>
+ #include <string>
+ 
+ #include "flutter/common/graphics/texture.h"
+@@ -15,6 +16,10 @@
+ #include "third_party/skia/include/gpu/ganesh/GrContextThreadSafeProxy.h"
+ #include "third_party/skia/include/gpu/ganesh/GrDirectContext.h"
+ 
++namespace impeller {
++class AiksContext;
++}  // namespace impeller
++
+ namespace flutter {
+ 
+ class DlImage;
+@@ -77,6 +82,8 @@ class SnapshotDelegate {
+ 
+   virtual GrDirectContext* GetGrContext() = 0;
+ 
++  virtual std::shared_ptr<impeller::AiksContext> GetAiksContext() const = 0;
++
+   virtual void MakeRasterSnapshot(sk_sp<DisplayList> display_list,
+                                   DlISize picture_size,
+                                   std::function<void(sk_sp<DlImage>)> callback,
+diff --git a/engine/src/flutter/shell/platform/embedder/embedder_external_texture_gl.cc b/engine/src/flutter/shell/platform/embedder/embedder_external_texture_gl.cc
+index d6279fee669..ec35764b57b 100644
+--- a/engine/src/flutter/shell/platform/embedder/embedder_external_texture_gl.cc
++++ b/engine/src/flutter/shell/platform/embedder/embedder_external_texture_gl.cc
+@@ -70,15 +70,19 @@ sk_sp<DlImage> EmbedderExternalTextureGL::ResolveTexture(
+     const SkISize& size) {
+   if (!!aiks_context) {
+     return ResolveTextureImpeller(texture_id, aiks_context, size);
+-  } else {
++  } else if (context) {
+     return ResolveTextureSkia(texture_id, context, size);
+   }
++  return nullptr;
+ }
+ 
+ sk_sp<DlImage> EmbedderExternalTextureGL::ResolveTextureSkia(
+     int64_t texture_id,
+     GrDirectContext* context,
+     const SkISize& size) {
++  if (!context) {
++    return nullptr;
++  }
+   context->flushAndSubmit();
+   context->resetContext(kAll_GrBackendState);
+   std::unique_ptr<FlutterOpenGLTexture> texture =
+diff --git a/engine/src/flutter/shell/platform/embedder/embedder_external_texture_gl.h b/engine/src/flutter/shell/platform/embedder/embedder_external_texture_gl.h
+index 7dbc631d56a..3ea22c255de 100644
+--- a/engine/src/flutter/shell/platform/embedder/embedder_external_texture_gl.h
++++ b/engine/src/flutter/shell/platform/embedder/embedder_external_texture_gl.h
+@@ -22,23 +22,6 @@ class EmbedderExternalTextureGL : public flutter::Texture {
+ 
+   ~EmbedderExternalTextureGL();
+ 
+- private:
+-  const ExternalTextureCallback& external_texture_callback_;
+-  sk_sp<DlImage> last_image_;
+-
+-  sk_sp<DlImage> ResolveTexture(int64_t texture_id,
+-                                GrDirectContext* context,
+-                                impeller::AiksContext* aiks_context,
+-                                const SkISize& size);
+-
+-  sk_sp<DlImage> ResolveTextureSkia(int64_t texture_id,
+-                                    GrDirectContext* context,
+-                                    const SkISize& size);
+-
+-  sk_sp<DlImage> ResolveTextureImpeller(int64_t texture_id,
+-                                        impeller::AiksContext* aiks_context,
+-                                        const SkISize& size);
+-
+   // |flutter::Texture|
+   void Paint(PaintContext& context,
+              const DlRect& bounds,
+@@ -57,6 +40,23 @@ class EmbedderExternalTextureGL : public flutter::Texture {
+   // |flutter::Texture|
+   void OnTextureUnregistered() override;
+ 
++ private:
++  const ExternalTextureCallback& external_texture_callback_;
++  sk_sp<DlImage> last_image_;
++
++  sk_sp<DlImage> ResolveTexture(int64_t texture_id,
++                                GrDirectContext* context,
++                                impeller::AiksContext* aiks_context,
++                                const SkISize& size);
++
++  sk_sp<DlImage> ResolveTextureSkia(int64_t texture_id,
++                                    GrDirectContext* context,
++                                    const SkISize& size);
++
++  sk_sp<DlImage> ResolveTextureImpeller(int64_t texture_id,
++                                        impeller::AiksContext* aiks_context,
++                                        const SkISize& size);
++
+   FML_DISALLOW_COPY_AND_ASSIGN(EmbedderExternalTextureGL);
+ };
+ 
+diff --git a/engine/src/flutter/shell/platform/embedder/embedder_external_texture_metal.h b/engine/src/flutter/shell/platform/embedder/embedder_external_texture_metal.h
+index c5fc1a594ef..c7a57c9fdf6 100644
+--- a/engine/src/flutter/shell/platform/embedder/embedder_external_texture_metal.h
++++ b/engine/src/flutter/shell/platform/embedder/embedder_external_texture_metal.h
+@@ -24,15 +24,6 @@ class EmbedderExternalTextureMetal : public flutter::Texture {
+ 
+   ~EmbedderExternalTextureMetal();
+ 
+- private:
+-  const ExternalTextureCallback& external_texture_callback_;
+-  sk_sp<DlImage> last_image_;
+-
+-  sk_sp<DlImage> ResolveTexture(int64_t texture_id,
+-                                GrDirectContext* context,
+-                                impeller::AiksContext* aiks_context,
+-                                const SkISize& size);
+-
+   // |flutter::Texture|
+   void Paint(PaintContext& context,
+              const DlRect& bounds,
+@@ -51,6 +42,15 @@ class EmbedderExternalTextureMetal : public flutter::Texture {
+   // |flutter::Texture|
+   void OnTextureUnregistered() override;
+ 
++ private:
++  const ExternalTextureCallback& external_texture_callback_;
++  sk_sp<DlImage> last_image_;
++
++  sk_sp<DlImage> ResolveTexture(int64_t texture_id,
++                                GrDirectContext* context,
++                                impeller::AiksContext* aiks_context,
++                                const SkISize& size);
++
+   FML_DISALLOW_COPY_AND_ASSIGN(EmbedderExternalTextureMetal);
+ };
+ 
+diff --git a/engine/src/flutter/shell/platform/embedder/tests/embedder_gl_unittests.cc b/engine/src/flutter/shell/platform/embedder/tests/embedder_gl_unittests.cc
+index a4bbf2f9769..5e81d132a90 100644
+--- a/engine/src/flutter/shell/platform/embedder/tests/embedder_gl_unittests.cc
++++ b/engine/src/flutter/shell/platform/embedder/tests/embedder_gl_unittests.cc
+@@ -4620,6 +4620,31 @@ TEST_F(EmbedderTest, ExternalTextureGLRefreshedTooOften) {
+   glFinish();
+ }
+ 
++TEST_F(EmbedderTest, ExternalTextureGLNullContextDoesNotCrash) {
++  EmbedderExternalTextureGL::ExternalTextureCallback callback(
++      [](int64_t, size_t, size_t) {
++        auto res = std::make_unique<FlutterOpenGLTexture>();
++        res->target = GL_TEXTURE_2D;
++        res->name = 1;
++        res->format = GL_RGBA8;
++        res->user_data = nullptr;
++        res->destruction_callback = [](void*) {};
++        res->width = res->height = 100;
++        return res;
++      });
++  EmbedderExternalTextureGL texture(1, callback);
++
++  DisplayListBuilder builder;
++  Texture::PaintContext ctx{
++      .canvas = &builder,
++      .gr_context = nullptr,
++      .aiks_context = nullptr,
++  };
++  // Should not crash even when last_image_ is null and contexts are null.
++  texture.Paint(ctx, DlRect::MakeXYWH(0, 0, 100, 100), false,
++                DlImageSampling::kLinear);
++}
++
+ TEST_F(
+     EmbedderTest,
+     PresentInfoReceivesFullScreenDamageWhenPopulateExistingDamageIsNotProvided) {

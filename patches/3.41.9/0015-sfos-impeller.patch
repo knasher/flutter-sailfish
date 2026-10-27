@@ -1,0 +1,49 @@
+Render with Impeller by default.
+
+Flutter renders with Impeller on iOS and Android. This embedder only enabled it with the --enable-impeller=true engine switch, which release builds can't be given (they ignore engine switches in the environment), so apps always rendered with Skia. On Jolla Phone 2026, Impeller gets rid of Skia's long stutters on blur-heavy frames: in a menu animation the slowest tenth of frames went from 52 ms to 39 ms, and the worst from 211 ms to 59 ms.
+
+The embedder now adds --enable-impeller=true unless FLUTTER_SFOS_IMPELLER=0 asks for Skia or a switch already chose. It needs two engine patches (patches/<ver>/engine/): 0002-impeller-root-transformation, as Impeller's OpenGL surface ignored the embedder's rotation and drew rotated apps sideways, and 0003-impeller-flatten-context, a backport of an upstream fix for a crash on a page transition away from a playing video.
+
+diff --git a/src/flutter/shell/platform/linux_embedded/flutter_project_bundle.cc b/src/flutter/shell/platform/linux_embedded/flutter_project_bundle.cc
+index 3168124..26249e3 100644
+--- a/src/flutter/shell/platform/linux_embedded/flutter_project_bundle.cc
++++ b/src/flutter/shell/platform/linux_embedded/flutter_project_bundle.cc
+@@ -6,6 +6,8 @@
+ 
+ #include <unistd.h>
+ 
++#include <algorithm>
++#include <cstdlib>
+ #include <iostream>
+ #include <string>
+ 
+@@ -91,9 +93,6 @@ void FlutterProjectBundle::SetSwitches(
+ }
+ 
+ const std::vector<std::string> FlutterProjectBundle::GetSwitches() {
+-  if (engine_switches_.size() == 0) {
+-    return GetSwitchesFromEnvironment();
+-  }
+   std::vector<std::string> switches;
+   switches.insert(switches.end(), engine_switches_.begin(),
+                   engine_switches_.end());
+@@ -101,6 +100,19 @@ const std::vector<std::string> FlutterProjectBundle::GetSwitches() {
+   auto env_switches = GetSwitchesFromEnvironment();
+   switches.insert(switches.end(), env_switches.begin(), env_switches.end());
+ 
++  // Render with Impeller, as Flutter does on iOS and Android, unless
++  // FLUTTER_SFOS_IMPELLER=0 asks for Skia or a switch already chose. Release
++  // builds ignore the engine switches in the environment, so this is the way
++  // to choose there.
++  const char* impeller = std::getenv("FLUTTER_SFOS_IMPELLER");
++  const bool chosen =
++      std::any_of(switches.begin(), switches.end(), [](const std::string& s) {
++        return s.rfind("--enable-impeller", 0) == 0;
++      });
++  if (!chosen && (!impeller || std::string(impeller) != "0")) {
++    switches.push_back("--enable-impeller=true");
++  }
++
+   return switches;
+ }
+ 

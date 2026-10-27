@@ -200,6 +200,27 @@ saves battery; timers and other Dart code keep running. A cover set with
 `SailfishCover` keeps updating while the app is paused. Needs a `flutter-sfos`
 runtime with patch 0011.
 
+## Rendering
+
+Works without app code. On `flutter-sfos` 7.sfos14 and later:
+
+- **Impeller** draws apps, as on Android and iOS. Set `FLUTTER_SFOS_IMPELLER=0`
+  in the environment to use Skia instead, e.g. to compare when something looks
+  wrong. It needs embedder patch 0015 and two engine patches in
+  `patches/<ver>/engine/`: `0002-impeller-root-transformation.patch` (Impeller's
+  OpenGL backend ignored the embedder's rotation) and
+  `0003-impeller-flatten-context.patch` (a backport of an upstream fix: a page
+  transition away from a playing video crashed).
+- **Frames follow the display.** The runtime is built with the embedder's
+  vsync (`ENABLE_VSYNC`), so frames are timed by Lipstick's frame callbacks at
+  the display's refresh rate (90 Hz on Jolla Phone 2026). Without it the engine
+  used its own 60 Hz timer, out of step with the display, and animations
+  juddered.
+
+Frames have about 11 ms at 90 Hz. Effects that are costly on a phone GPU, such
+as `BackdropFilter` blurs or large blurred shadows redrawn on every frame of an
+animation, can still take longer.
+
 ## Plugins
 
 Flutter apps on Sailfish OS are Linux apps to Dart (`Platform.isLinux`), and
