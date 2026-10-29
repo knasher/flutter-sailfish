@@ -39,7 +39,9 @@ SailfishCover.set(
   446×714 pixels with four or fewer apps open and about 284×454 with more, so
   lay it out for both; it gets its size through `MediaQuery`.
 - It has its own widget tree, so give it the app's state through listenables
-  such as `ValueNotifier`s, not inherited widgets.
+  such as `ValueNotifier`s, not inherited widgets. Calling `set` again
+  updates that tree, as calling `runApp` again does: a cover of the same type
+  keeps its state, and the old one is disposed otherwise.
 - It is redrawn while the home screen shows it, whenever it changes.
   `SailfishCover.visible` tells you when it's shown, for example to run a
   timer only then.

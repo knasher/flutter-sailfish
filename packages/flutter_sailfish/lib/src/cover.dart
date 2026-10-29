@@ -33,7 +33,10 @@ class CoverAction {
 ///
 /// The cover has its own widget tree, separate from the app's, so give it
 /// the app's state through listenables (for example [ValueNotifier]s) rather
-/// than inherited widgets.
+/// than inherited widgets. The tree lasts as long as the app: setting the
+/// cover again updates it as calling `runApp` again updates the app's tree,
+/// and a new tile size lays it out again, so state is kept where it would be
+/// in the app, and the rest is disposed.
 class SailfishCover {
   SailfishCover._();
 
@@ -62,7 +65,6 @@ class SailfishCover {
   static void set(Widget cover, {List<CoverAction> actions = const []}) {
     _listen();
     _cover = cover;
-    _offscreen = null;
     _drawn = false;
     _actions = actions;
     _channel.send({
@@ -90,13 +92,8 @@ class SailfishCover {
       }
       if (message.containsKey('available')) {
         _available = message['available'] == true;
-        final width = message['width'] as int? ?? 0;
-        final height = message['height'] as int? ?? 0;
-        if (width != _width || height != _height) {
-          _width = width;
-          _height = height;
-          _offscreen = null;
-        }
+        _width = message['width'] as int? ?? 0;
+        _height = message['height'] as int? ?? 0;
         visible.value = message['visible'] == true;
         _changed();
       }
@@ -128,14 +125,12 @@ class SailfishCover {
     try {
       final view = ui.PlatformDispatcher.instance.implicitView!;
       final dpr = view.devicePixelRatio;
-      _offscreen ??= _OffscreenCover(
+      _offscreen ??= _OffscreenCover(view, _changed);
+      final image = await _offscreen!.draw(
         _cover!,
         Size(_width / dpr, _height / dpr),
         dpr,
-        view,
-        _changed,
       );
-      final image = await _offscreen!.capture();
       final rgba = await image.toByteData(format: ui.ImageByteFormat.rawRgba);
       final width = image.width, height = image.height;
       image.dispose();
@@ -174,59 +169,75 @@ Future<ui.Image> debugRenderCover(
   double devicePixelRatio,
 ) {
   final view = ui.PlatformDispatcher.instance.implicitView!;
-  return _OffscreenCover(cover, size, devicePixelRatio, view, () {}).capture();
+  return _OffscreenCover(view, () {}).draw(cover, size, devicePixelRatio);
 }
 
 // A widget tree of its own, laid out at the cover's size and painted on
 // demand. Its RenderView is never composited into the app's view.
 class _OffscreenCover {
-  _OffscreenCover(
-    Widget cover,
-    Size size,
-    this.dpr,
-    ui.FlutterView view,
-    VoidCallback onChanged,
-  ) {
-    final renderView = RenderView(
-      view: view,
-      child: RenderPositionedBox(child: _boundary),
-      configuration: ViewConfiguration(
-        logicalConstraints: BoxConstraints.tight(size),
-        physicalConstraints: BoxConstraints.tight(size * dpr),
-        devicePixelRatio: dpr,
-      ),
-    );
-    _pipelineOwner = PipelineOwner(onNeedVisualUpdate: onChanged)
-      ..rootNode = renderView;
-    renderView.prepareInitialFrame();
+  _OffscreenCover(ui.FlutterView view, VoidCallback onChanged) {
+    // Changes made while drawing are in that drawing.
+    void changed() {
+      if (!_drawing) {
+        onChanged();
+      }
+    }
+
+    _renderView = RenderView(view: view, child: _boundary);
+    _pipelineOwner = PipelineOwner(onNeedVisualUpdate: changed)
+      ..rootNode = _renderView;
     _buildOwner = BuildOwner(
       focusManager: FocusManager(),
-      onBuildScheduled: onChanged,
+      onBuildScheduled: changed,
     );
-    _element = RenderObjectToWidgetAdapter<RenderBox>(
-      container: _boundary,
-      child: MediaQuery(
-        data: MediaQueryData(size: size, devicePixelRatio: dpr),
-        child: Directionality(
-          textDirection: TextDirection.ltr,
-          child: Material(type: MaterialType.transparency, child: cover),
-        ),
-      ),
-    ).attachToRenderTree(_buildOwner);
   }
 
-  final double dpr;
   final _boundary = RenderRepaintBoundary();
+  late final RenderView _renderView;
   late final PipelineOwner _pipelineOwner;
   late final BuildOwner _buildOwner;
-  late final Element _element;
+  RenderObjectToWidgetElement<RenderBox>? _element;
+  Widget? _cover;
+  Size? _size;
+  double? _dpr;
+  bool _drawing = false;
 
-  Future<ui.Image> capture() {
-    _buildOwner.buildScope(_element);
-    _buildOwner.finalizeTree();
-    _pipelineOwner.flushLayout();
-    _pipelineOwner.flushCompositingBits();
-    _pipelineOwner.flushPaint();
+  // Draws [cover] filling [size] (logical pixels). A new cover or size
+  // updates the tree.
+  Future<ui.Image> draw(Widget cover, Size size, double dpr) {
+    _drawing = true;
+    try {
+      if (!identical(cover, _cover) || size != _size || dpr != _dpr) {
+        _cover = cover;
+        _size = size;
+        _dpr = dpr;
+        _renderView.configuration = ViewConfiguration(
+          logicalConstraints: BoxConstraints.tight(size),
+          physicalConstraints: BoxConstraints.tight(size * dpr),
+          devicePixelRatio: dpr,
+        );
+        if (_element == null) {
+          _renderView.prepareInitialFrame();
+        }
+        _element = RenderObjectToWidgetAdapter<RenderBox>(
+          container: _boundary,
+          child: MediaQuery(
+            data: MediaQueryData(size: size, devicePixelRatio: dpr),
+            child: Directionality(
+              textDirection: TextDirection.ltr,
+              child: Material(type: MaterialType.transparency, child: cover),
+            ),
+          ),
+        ).attachToRenderTree(_buildOwner, _element);
+      }
+      _buildOwner.buildScope(_element!);
+      _buildOwner.finalizeTree();
+      _pipelineOwner.flushLayout();
+      _pipelineOwner.flushCompositingBits();
+      _pipelineOwner.flushPaint();
+    } finally {
+      _drawing = false;
+    }
     return _boundary.toImage(pixelRatio: dpr);
   }
 }

@@ -163,6 +163,8 @@ void main() {
 - **State.** It has its own widget tree, separate from the app's, so give it
   the app's state through listenables such as `ValueNotifier`s rather than
   inherited widgets (see `CounterCover` in `examples/hello/lib/main.dart`).
+  Setting the cover again updates that tree, as calling `runApp` again does,
+  so a cover can be set again whenever its buttons change.
 - **When it's drawn.** Once when set, then only while the home screen shows
   it: again whenever it changes, for example on `setState`.
   `SailfishCover.visible` says when it's shown, for example to run a clock
