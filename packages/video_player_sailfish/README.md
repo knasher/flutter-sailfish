@@ -66,10 +66,10 @@ Flutter texture, which costs CPU and battery for large videos.
   In `playbin`, gst-droid waited forever before the first frame: decodebin
   sends the decoder a second, identical `STREAM_START`, and gst-droid then
   waits for its codec to end a stream it was never given. The plugin drops
-  that repeat. Known issue: an app closed just after showing a hardware video
-  sometimes crashes as its process exits, in the phone's graphics buffer
-  mapper, while the codec's buffers are still being freed (Jolla Phone
-  2026). Nothing shows, and disposing a player while the app runs is fine.
+  that repeat. On Jolla Phone 2026 a test program that exits the moment it
+  has stopped a hardware video can crash as it exits, in the phone's
+  graphics buffer mapper, while the codec's buffers are still being freed.
+  Apps haven't shown it.
 - **No freezes.** `create` waits at most 5 seconds for the first frame, then
   fails, so `VideoPlayerController.initialize` throws instead of the app
   hanging. Sony's version waited forever on the platform thread.
@@ -85,7 +85,8 @@ Flutter texture, which costs CPU and battery for large videos.
 - **A safer dispose.** Flutter's raster thread can still ask a disposed
   player's texture for a frame until the texture is unregistered, so the
   player's texture and buffers are freed only after that. Sony's version
-  freed them at once.
+  freed them at once. The player is forgotten before its video stops, so
+  the last event it sends ("not playing") is dropped.
 
 Changes to Sony's code are listed at the top of this file and in the
 comments where they were made.

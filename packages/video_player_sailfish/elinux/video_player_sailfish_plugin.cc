@@ -61,10 +61,8 @@ class VideoPlayerPlugin : public flutter::Plugin {
       : plugin_registrar_(plugin_registrar),
         texture_registrar_(texture_registrar) {}
   virtual ~VideoPlayerPlugin() {
-    for (auto itr = players_.begin(); itr != players_.end();) {
-      auto texture_id = itr->first;
-      DisposePlayer(texture_id);
-      itr = players_.erase(itr);
+    while (!players_.empty()) {
+      DisposePlayer(players_.begin()->first);
     }
 
     GstVideoPlayer::GstLibraryUnload();
@@ -275,10 +273,8 @@ void VideoPlayerPlugin::HandleInitializeMethodCall(
   // Dispose of all existing players. This helps to shut down existing players
   // on a hot restart.
   // https://github.com/flutter/flutter/issues/10437
-  for (auto itr = players_.begin(); itr != players_.end();) {
-    auto texture_id = itr->first;
-    DisposePlayer(texture_id);
-    itr = players_.erase(itr);
+  while (!players_.empty()) {
+    DisposePlayer(players_.begin()->first);
   }
 
   flutter::EncodableMap result;
@@ -432,7 +428,6 @@ void VideoPlayerPlugin::HandleDisposeMethodCall(
 
   if (players_.find(texture_id) != players_.end()) {
     DisposePlayer(texture_id);
-    players_.erase(texture_id);
     result.emplace(flutter::EncodableValue(kEncodableMapkeyResult),
                    flutter::EncodableValue());
   } else {
@@ -654,13 +649,20 @@ void VideoPlayerPlugin::SendIsPlayingStateUpdate(int64_t texture_id,
 
 void VideoPlayerPlugin::DisposePlayer(int64_t texture_id) {
   auto it = players_.find(texture_id);
-  if (it == players_.end() || !it->second) {
+  if (it == players_.end()) {
+    return;
+  }
+  // Out of players_ before the video stops, as stopping sends one last
+  // event ("not playing"), which then finds no player to send it to.
+  std::unique_ptr<FlutterVideoPlayer> owned = std::move(it->second);
+  players_.erase(it);
+  if (!owned) {
     return;
   }
   // The raster thread may still ask the texture for a frame until it is
   // unregistered, so the rest of the instance is freed only after that.
   // (Sony's version freed it at once.)
-  FlutterVideoPlayer* instance = it->second.release();
+  FlutterVideoPlayer* instance = owned.release();
   instance->event_sink = nullptr;
   if (instance->event_channel) {
     instance->event_channel->SetStreamHandler(nullptr);
