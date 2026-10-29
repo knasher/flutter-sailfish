@@ -309,3 +309,27 @@ Started from a shell, `/usr/bin/<name>` runs outside the sandbox. To run it
 sandboxed, with Sailjail's logs, see its
 [debugging guide](https://github.com/sailfishos/sailjail/blob/master/APPDEBUG.md):
 `sailjail --trace=<dir> -p <name>.desktop /usr/bin/<name>`.
+
+## Log lines you can ignore
+
+Started from a shell, apps print these lines on Jolla Phone 2026 (other
+phones name their own drivers). They come from libhybris, which loads the
+phone's Android graphics drivers, and are harmless:
+
+```text
+library "/vendor/lib64/egl/mt6858/libGLES_mali.so" needed or dlopened by "(unknown)" is not accessible for the namespace "(default)"
+library "/vendor/lib64/egl/mt6858/libGLES_mali.so" ("/vendor/lib64/egl/mt6858/libGLES_mali.so") needed or dlopened by "(unknown)" is not accessible for the namespace: [...]
+library "/vendor/lib64/hw/mt6858/mapper.mediatek.so" needed or dlopened by "(unknown)" is not accessible for the namespace "(default)"
+library "/vendor/lib64/hw/mt6858/mapper.mediatek.so" ("/vendor/lib64/hw/mt6858/mapper.mediatek.so") needed or dlopened by "(unknown)" is not accessible for the namespace: [...]
+...
+invalid handle: (nil)
+invalid handle: (nil)
+```
+
+The GPU driver and the graphics buffer mapper keep data for each thread that
+uses them. libhybris tries to open them a second time, to keep them loaded
+until that data is freed, but they belong to the vendor's namespace, so that
+fails. When a thread that used them ends, libhybris closes the handle it never
+got, so apps print up to two `invalid handle: (nil)` lines as they exit. Both
+libraries stay loaded until the app exits anyway. The code is libhybris's
+`hybris/common/dso_handle_counters.cpp`.
