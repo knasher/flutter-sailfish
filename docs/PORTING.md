@@ -202,6 +202,29 @@ saves battery; timers and other Dart code keep running. A cover set with
 `SailfishCover` keeps updating while the app is paused. Needs a `flutter-sfos`
 runtime with patch 0011.
 
+## Keyboard
+
+Works without app code. Sailfish's keyboard follows each text field's
+settings, as on Android and iOS:
+
+- `keyboardType`: `number` shows a number pad and `phone` a dial pad.
+  `emailAddress` and `url` show the usual keys with `@` or `/` in place of the
+  comma. `TextInputType.none` keeps the keyboard hidden, for apps that draw
+  their own.
+- `obscureText` fields get no suggestions or capitals. So does
+  `visiblePassword`, with the text shown.
+- `enableSuggestions` turns the suggestion bar on and off (it only shows when
+  word suggestions are on in the keyboard settings). `textCapitalization`
+  turns on capitals at the start of sentences. That's all the keyboard does,
+  so `words` and `characters` get the same.
+- `textInputAction` sets the enter key's icon: a tick for `done` and `go`, and
+  icons of their own for `next`, `search` and `send`. Other actions keep the
+  usual enter key.
+
+As on Android, changing a focused field's `keyboardType` doesn't change the
+keyboard until the field loses focus and gets it back. Needs a `flutter-sfos`
+runtime with patch 0017.
+
 ## Rendering
 
 Works without app code. On `flutter-sfos` 7.sfos14 and later:
